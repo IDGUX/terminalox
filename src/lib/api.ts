@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   DeployReport,
+  HardenReadiness,
   HardenReport,
   KeyInfo,
   KeyUsage,
@@ -38,16 +39,21 @@ export const api = {
     serverId: Uuid,
     keyId: Uuid,
     password: string,
-    assignToServer: boolean
+    assignToServer: boolean,
+    sudoPassword: string | null = null
   ) =>
     invoke<DeployReport>("deploy_key", {
       serverId,
       keyId,
       password,
+      sudoPassword,
       assignToServer,
     }),
 
-  hardenServer: (serverId: Uuid, sudoPassword: string) =>
+  checkHardenReadiness: (serverId: Uuid) =>
+    invoke<HardenReadiness>("check_harden_readiness", { serverId }),
+
+  hardenServer: (serverId: Uuid, sudoPassword: string | null = null) =>
     invoke<HardenReport>("harden_server", { serverId, sudoPassword }),
 
   syncSshConfig: () => invoke<string>("sync_ssh_config"),

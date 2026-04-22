@@ -12,12 +12,15 @@
   import BackupDialog from "$lib/components/BackupDialog.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
   import { app } from "$lib/stores/app.svelte";
-  import type { Server } from "$lib/types";
+  import type { HardenReadiness, Server } from "$lib/types";
 
   let showAdd = $state(false);
   let editFor = $state<Server | null>(null);
   let deployFor = $state<Server | null>(null);
-  let hardenFor = $state<Server | null>(null);
+  let hardenFor = $state<
+    | { server: Server; readiness: HardenReadiness & { status: "ready" } }
+    | null
+  >(null);
   let deleteFor = $state<Server | null>(null);
   let backupMode = $state<"export" | "import" | null>(null);
   let loadError = $state<string | null>(null);
@@ -42,7 +45,7 @@
         onAdd={() => (showAdd = true)}
         onEdit={(s) => (editFor = s)}
         onDeploy={(s) => (deployFor = s)}
-        onHarden={(s) => (hardenFor = s)}
+        onHarden={(s, r) => (hardenFor = { server: s, readiness: r })}
         onDelete={(s) => (deleteFor = s)}
         onExport={() => (backupMode = "export")}
         onImport={() => (backupMode = "import")}
@@ -79,7 +82,11 @@
     <DeployKeyDialog server={deployFor} onClose={() => (deployFor = null)} />
   {/if}
   {#if hardenFor}
-    <HardenServerDialog server={hardenFor} onClose={() => (hardenFor = null)} />
+    <HardenServerDialog
+      server={hardenFor.server}
+      readiness={hardenFor.readiness}
+      onClose={() => (hardenFor = null)}
+    />
   {/if}
   {#if deleteFor}
     <DeleteServerDialog server={deleteFor} onClose={() => (deleteFor = null)} />

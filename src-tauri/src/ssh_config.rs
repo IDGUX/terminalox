@@ -18,7 +18,14 @@ pub fn render_block(store: &Store) -> String {
     lines.push_str(BEGIN);
     lines.push_str(" — managed by terminalox, do not edit between markers\n");
     for server in &store.servers {
-        lines.push_str(&format!("Host {}\n", alias_for(&server.name)));
+        // Match both the alias and the raw hostname/IP so that
+        // `ssh <alias>` and `ssh <ip>` / `ssh user@<ip>` all pick up the key.
+        let alias = alias_for(&server.name);
+        if alias == server.host {
+            lines.push_str(&format!("Host {}\n", alias));
+        } else {
+            lines.push_str(&format!("Host {} {}\n", alias, server.host));
+        }
         lines.push_str(&format!("    HostName {}\n", server.host));
         lines.push_str(&format!("    User {}\n", server.user));
         if server.port != 22 {

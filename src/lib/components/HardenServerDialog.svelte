@@ -2,14 +2,20 @@
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
-  import type { HardenReport, Server } from "$lib/types";
+  import type { HardenReadiness, HardenReport, PrivilegeMethod, Server } from "$lib/types";
 
-  let { server, onClose }: { server: Server; onClose: () => void } = $props();
+  let { server, readiness, onClose }: {
+    server: Server;
+    readiness: HardenReadiness & { status: "ready" };
+    onClose: () => void;
+  } = $props();
 
   let sudoPassword = $state("");
   let submitting = $state(false);
   let error = $state<string | null>(null);
   let report = $state<HardenReport | null>(null);
+
+  const needsPassword = readiness.method === "sudo_with_password";
 
   async function submit(e: Event) {
     e.preventDefault();
@@ -17,7 +23,10 @@
     report = null;
     submitting = true;
     try {
-      report = await api.hardenServer(server.id, sudoPassword);
+      report = await api.hardenServer(
+        server.id,
+        needsPassword ? sudoPassword : null,
+      );
       if (report.hardened) {
         toast.success(`${server.name} ist jetzt gehärtet`);
       } else {
@@ -34,6 +43,12 @@
   function stepIcon(ok: boolean): string {
     return ok ? "✓" : "…";
   }
+
+  function methodLabel(m: PrivilegeMethod): string {
+    if (m === "root") return "Als root eingeloggt — keine Eskalation nötig";
+    if (m === "sudo_nopasswd") return "Passwortloses sudo verfügbar (NOPASSWD)";
+    return "sudo ist verfügbar, aber braucht dein Passwort";
+  }
 </script>
 
 <div class="overlay" onclick={onClose}>
@@ -41,23 +56,38 @@
     {#if !report}
       <h3>{server.name} härten</h3>
       <p class="hint">
-        Der Server läuft aktuell mit Key-Auth, aber Passwort-Login ist auf dem Server noch aktiv.
-        Mit dem Härten wird <code>PasswordAuthentication no</code> via Drop-in
-        <code>/etc/ssh/sshd_config.d/99-terminalox.conf</code> gesetzt, <code>sshd -t</code>
-        validiert, <code>sshd</code> reloaded und das Ergebnis verifiziert. Pre-Flight prüft
-        vorher, ob Key-Auth wirklich geht — du kannst dich nicht aussperren.
+        Setzt <code>PasswordAuthentication no</code> via Drop-in
+        <code>/etc/ssh/sshd_config.d/00-terminalox.conf</code>, validiert mit
+        <code>sshd -t</code>, reloaded <code>sshd</code> und verifiziert mit
+        <code>sshd -T</code>. Pre-Flight hat geprüft, dass Key-Auth läuft — du kannst dich
+        nicht aussperren. Bei jedem Fehler: vollständiger Rollback.
       </p>
 
-      <label>
-        Sudo-Passwort (wird nicht gespeichert)
-        <input type="password" bind:value={sudoPassword} required autofocus autocomplete="current-password" />
-      </label>
+      <p class="method">✓ {methodLabel(readiness.method)}</p>
+
+      {#if needsPassword}
+        <label>
+          sudo-Passwort für {server.user}@{server.host}
+          <input
+            type="password"
+            bind:value={sudoPassword}
+            required
+            autofocus
+            autocomplete="current-password"
+          />
+          <span class="hint">Einmalig für <code>sudo -v</code>, wird nicht gespeichert.</span>
+        </label>
+      {/if}
 
       {#if error}<p class="error">{error}</p>{/if}
 
       <div class="buttons">
         <button type="button" onclick={onClose}>Abbrechen</button>
-        <button type="submit" class="primary" disabled={submitting}>
+        <button
+          type="submit"
+          class="primary"
+          disabled={submitting || (needsPassword && !sudoPassword)}
+        >
           {submitting ? "Härte…" : "Härten"}
         </button>
       </div>
@@ -71,7 +101,7 @@
           {stepIcon(report.keyAuthVerified)} Key-Auth funktioniert
         </li>
         <li class:ok={report.dropinInstalled}>
-          {stepIcon(report.dropinInstalled)} Drop-in <code>99-terminalox.conf</code> geschrieben
+          {stepIcon(report.dropinInstalled)} Drop-in <code>00-terminalox.conf</code> geschrieben
         </li>
         <li class:ok={report.sshdValidated}>
           {stepIcon(report.sshdValidated)} <code>sshd -t</code> validiert
@@ -127,6 +157,15 @@
   }
   h3 { margin: 0 0 10px; font-size: 16px; }
   .hint { font-size: 13px; color: #9ca3af; margin: 0 0 14px; line-height: 1.5; }
+  .method {
+    font-size: 12px;
+    color: #34d399;
+    background: #052e26;
+    padding: 8px 10px;
+    border-radius: 6px;
+    margin: 0 0 14px;
+  }
+  code { background: #11141a; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
   label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 10px; }
   input {
     width: 100%;
@@ -139,7 +178,7 @@
     box-sizing: border-box;
     font-size: 14px;
   }
-  code { background: #11141a; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .hint { font-size: 11px; color: #9ca3af; display: block; margin-top: 4px; }
 
   .steps { list-style: none; margin: 0 0 14px; padding: 0; }
   .steps li {

@@ -25,21 +25,25 @@
   let remoteErrorMsg = $state<string | null>(null);
 
   const hasKeyAuth = server.auth.mode === "key";
-  // Password is needed when either: (a) the server is hardened (for sudo during unharden),
-  // or (b) the server is on password auth and we want remote cleanup.
-  const needsPassword =
-    cleanupRemote && (server.hardened || server.auth.mode === "password");
+  // Password is needed when either:
+  //   - server is on password auth → used to log in for cleanup
+  //   - server is hardened → used as sudo password for unharden (Debian/Ubuntu default)
+  const needsCleanupPassword = cleanupRemote && server.auth.mode === "password";
+  const needsSudoPassword = cleanupRemote && server.hardened;
+  const needsPassword = needsCleanupPassword || needsSudoPassword;
 
   async function callDelete(force: boolean) {
     const opts: {
       id: Uuid;
       cleanupRemote: boolean;
       password: string | null;
+      sudoPassword: string | null;
       force: boolean;
     } = {
       id: server.id,
       cleanupRemote,
-      password: needsPassword ? password : null,
+      password: needsCleanupPassword ? password : null,
+      sudoPassword: needsSudoPassword ? password : null,
       force,
     };
     return (await invoke<DeleteReport>("delete_server_full", { opts })) as DeleteReport;
@@ -111,9 +115,9 @@
       {#if server.hardened}
         <p class="body revert">
           🛡 Dieser Server ist gehärtet. Beim Remote-Cleanup wird zuerst das Drop-in
-          <code>/etc/ssh/sshd_config.d/99-terminalox.conf</code> gelöscht und
-          <code>sshd</code> reloaded — damit ist Passwort-Login wieder möglich. Dafür wird
-          dein Passwort für <code>sudo</code> gebraucht.
+          <code>/etc/ssh/sshd_config.d/00-terminalox.conf</code> gelöscht und
+          <code>sshd</code> reloaded — damit ist Passwort-Login wieder möglich.
+          Falls der Remote-User sudo mit Passwort nutzt, wird das unten eingegebene Passwort verwendet.
         </p>
       {/if}
 
@@ -129,9 +133,14 @@
           Passwort für {server.user}@{server.host}
           <input type="password" bind:value={password} required />
           <span class="hint">
-            {server.hardened
-              ? "Für sudo beim Revert des Härtens — wird nicht gespeichert."
-              : "Nur einmal für den Cleanup-Connect, wird nicht gespeichert."}
+            {#if needsSudoPassword && needsCleanupPassword}
+              Für den Cleanup-Login und — falls nötig — als sudo-Passwort beim Revert.
+            {:else if needsSudoPassword}
+              Wird als sudo-Passwort beim Revert genutzt (falls der User kein passwortloses sudo hat).
+            {:else}
+              Nur einmal für den Cleanup-Connect.
+            {/if}
+            Wird nicht gespeichert.
           </span>
         </label>
       {/if}

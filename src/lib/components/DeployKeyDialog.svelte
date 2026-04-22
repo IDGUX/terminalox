@@ -9,6 +9,8 @@
   let keyChoice = $state<"new" | string>("new");
   let newKeyName = $state(server.name.replace(/[^a-zA-Z0-9_-]/g, "_"));
   let assignToServer = $state(true);
+  let sudoDiffers = $state(false);
+  let sudoPassword = $state("");
   let submitting = $state(false);
   let error = $state<string | null>(null);
   let report = $state<DeployReport | null>(null);
@@ -26,7 +28,14 @@
       } else {
         keyId = keyChoice;
       }
-      report = await api.deployKey(server.id, keyId, password, assignToServer);
+      const effectiveSudo = sudoDiffers && sudoPassword ? sudoPassword : null;
+      report = await api.deployKey(
+        server.id,
+        keyId,
+        password,
+        assignToServer,
+        effectiveSudo,
+      );
       await app.refresh();
     } catch (e) {
       error = String(e);
@@ -46,10 +55,11 @@
       <h3>SSH-Key auf {server.name} deployen &amp; härten</h3>
       <p class="hint">
         Die App erzeugt einen Key (oder nutzt einen vorhandenen), trägt den Public Key
-        in <code>~/.ssh/authorized_keys</code> ein, verifiziert dass Key-Auth funktioniert, und
-        <strong>deaktiviert dann Passwort-Login</strong> via Drop-in
-        <code>/etc/ssh/sshd_config.d/99-terminalox.conf</code>. Dein Passwort wird einmalig
-        für SSH und für <code>sudo</code> verwendet, nicht gespeichert.
+        in <code>~/.ssh/authorized_keys</code> ein und verifiziert Key-Auth.
+        Danach wird <strong>Passwort-Login deaktiviert</strong> —
+        <em>sofern</em> der User dafür root ist oder passwortloses sudo hat. Sonst wird das
+        Härten übersprungen (mit Hinweis) und du kannst es später über „Server härten"
+        nachholen. Dein Passwort wird einmalig für SSH benutzt und nicht gespeichert.
       </p>
 
       <label>
@@ -70,9 +80,25 @@
       {/if}
 
       <label>
-        Passwort (einmalig, für SSH + sudo)
+        Passwort (einmalig, für Key-Upload und — falls nötig — sudo)
         <input type="password" bind:value={password} required autofocus />
+        <span class="hint">
+          Auf Debian/Ubuntu ist das SSH-Passwort meist auch das sudo-Passwort. Wird für
+          beides wiederverwendet, falls Härten sudo braucht.
+        </span>
       </label>
+
+      <label class="checkbox">
+        <input type="checkbox" bind:checked={sudoDiffers} />
+        sudo-Passwort weicht ab
+      </label>
+
+      {#if sudoDiffers}
+        <label>
+          sudo-Passwort
+          <input type="password" bind:value={sudoPassword} />
+        </label>
+      {/if}
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={assignToServer} />
@@ -101,7 +127,7 @@
           {stepIcon(report.keyAuthVerified)} Key-Auth funktioniert (Pre-Flight mit frischer Session)
         </li>
         <li class:ok={report.dropinInstalled}>
-          {stepIcon(report.dropinInstalled)} Drop-in <code>99-terminalox.conf</code> geschrieben
+          {stepIcon(report.dropinInstalled)} Drop-in <code>00-terminalox.conf</code> geschrieben
         </li>
         <li class:ok={report.sshdValidated}>
           {stepIcon(report.sshdValidated)} <code>sshd -t</code> validiert
