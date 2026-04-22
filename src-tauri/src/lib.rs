@@ -50,6 +50,7 @@ pub fn run() {
             commands::session::close_session,
             commands::deploy::deploy_key,
             commands::harden::harden_server,
+            commands::harden::check_harden_readiness,
             commands::config::sync_ssh_config,
             commands::backup::export_backup,
             commands::backup::inspect_backup,

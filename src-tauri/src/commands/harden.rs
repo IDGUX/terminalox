@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
-use crate::ssh::harden;
+use crate::ssh::harden::{self, HardenReadiness};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -21,9 +21,49 @@ pub struct HardenReport {
 }
 
 #[tauri::command]
+pub async fn check_harden_readiness(
+    server_id: Uuid,
+    state: State<'_, AppState>,
+) -> AppResult<HardenReadiness> {
+    let (host, port, user, key_path) = {
+        let store = state.store.read().await;
+        let server = store
+            .find_server(server_id)
+            .ok_or(AppError::UnknownServer)?;
+        let key_id = match &server.auth {
+            AuthMode::Key { key_id } => *key_id,
+            AuthMode::Password => {
+                return Ok(HardenReadiness::Unavailable {
+                    reason:
+                        "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen."
+                            .into(),
+                });
+            }
+        };
+        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
+        (
+            server.host.clone(),
+            server.port,
+            server.user.clone(),
+            key.private_path.clone(),
+        )
+    };
+
+    let session = match harden::open_key_session(&host, port, &user, &key_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(HardenReadiness::Unavailable {
+                reason: format!("Key-Auth funktioniert nicht: {e}"),
+            });
+        }
+    };
+    harden::probe_readiness(session).await
+}
+
+#[tauri::command]
 pub async fn harden_server(
     server_id: Uuid,
-    sudo_password: String,
+    sudo_password: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<HardenReport> {
     let (host, port, user, key_path) = {
@@ -65,7 +105,7 @@ pub async fn harden_server(
     };
 
     // Step 2: run the harden flow (drop-in + validate + reload + verify, with rollback).
-    let outcome = harden::harden(session, &sudo_password).await?;
+    let outcome = harden::harden(session, sudo_password.as_deref()).await?;
     report.dropin_installed = outcome.dropin_installed;
     report.sshd_validated = outcome.sshd_validated;
     report.sshd_reloaded = outcome.sshd_reloaded;

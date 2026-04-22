@@ -79,9 +79,13 @@ pub struct DeleteServerOptions {
     /// Attempt to remove the deployed public key from the remote host's authorized_keys.
     #[serde(default)]
     pub cleanup_remote: bool,
-    /// Password used for remote cleanup (password-auth servers) and for `sudo` during unharden.
+    /// Password for remote cleanup on password-auth servers.
     #[serde(default)]
     pub password: Option<String>,
+    /// Sudo password used by unharden when the remote user needs one (Debian/Ubuntu default).
+    /// Unused if the remote user is root or has NOPASSWD sudo.
+    #[serde(default)]
+    pub sudo_password: Option<String>,
     /// Proceed with local deletion even if remote cleanup fails.
     #[serde(default)]
     pub force: bool,
@@ -133,14 +137,9 @@ pub async fn delete_server_full(
                 let session =
                     harden::open_key_session(&server.host, server.port, &server.user, &key.private_path)
                         .await?;
-                // Sudo password: use provided password (typically same as SSH password).
-                let sudo_pw = opts.password.as_deref().unwrap_or("");
-                if sudo_pw.is_empty() {
-                    return Err(AppError::Other(
-                        "Passwort wird für sudo beim Revert benötigt".into(),
-                    ));
-                }
-                harden::unharden(session, sudo_pw).await
+                // Unharden may need a sudo password (Debian/Ubuntu default).
+                // Frontend typically passes the SSH password here as a sensible default.
+                harden::unharden(session, opts.sudo_password.as_deref()).await
             })
             .await;
 

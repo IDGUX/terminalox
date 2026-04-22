@@ -40,6 +40,12 @@ export interface HardenReport {
   warnings: string[];
 }
 
+export type PrivilegeMethod = "root" | "sudo_nopasswd" | "sudo_with_password";
+
+export type HardenReadiness =
+  | { status: "ready"; method: PrivilegeMethod }
+  | { status: "unavailable"; reason: string };
+
 export interface NewServerInput {
   name: string;
   host: string;

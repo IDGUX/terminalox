@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
-  import type { Server } from "$lib/types";
+  import type { HardenReadiness, Server, Uuid } from "$lib/types";
 
   let {
     onAdd,
@@ -15,14 +16,84 @@
     onAdd: () => void;
     onEdit: (s: Server) => void;
     onDeploy: (s: Server) => void;
-    onHarden: (s: Server) => void;
+    onHarden: (s: Server, r: HardenReadiness & { status: "ready" }) => void;
     onDelete: (s: Server) => void;
     onExport: () => void;
     onImport: () => void;
   } = $props();
 
+  type ReadinessState =
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "done"; value: HardenReadiness }
+    | { kind: "error"; message: string };
+
+  let readinessByServer = $state<Record<Uuid, ReadinessState>>({});
+
   function select(s: Server) {
     app.selectedServerId = s.id;
+    ensureReadiness(s);
+  }
+
+  function ensureReadiness(s: Server) {
+    if (s.auth.mode !== "key" || s.hardened) return;
+    const cur = readinessByServer[s.id];
+    if (cur && cur.kind !== "error") return;
+    readinessByServer = { ...readinessByServer, [s.id]: { kind: "loading" } };
+    api
+      .checkHardenReadiness(s.id)
+      .then((value) => {
+        readinessByServer = { ...readinessByServer, [s.id]: { kind: "done", value } };
+      })
+      .catch((e) => {
+        readinessByServer = {
+          ...readinessByServer,
+          [s.id]: { kind: "error", message: String(e) },
+        };
+      });
+  }
+
+  function currentReadiness(s: Server | null): ReadinessState {
+    if (!s) return { kind: "idle" };
+    return readinessByServer[s.id] ?? { kind: "idle" };
+  }
+
+  function hardenButtonTitle(r: ReadinessState): string {
+    if (r.kind === "loading") return "Prüfe, ob Härten möglich ist …";
+    if (r.kind === "error") return `Konnte Readiness nicht prüfen: ${r.message}`;
+    if (r.kind === "done" && r.value.status === "unavailable") return r.value.reason;
+    if (r.kind === "done" && r.value.status === "ready") {
+      if (r.value.method === "root") return "Härten möglich (als root eingeloggt)";
+      if (r.value.method === "sudo_nopasswd") return "Härten möglich (passwortloses sudo)";
+      return "Härten möglich (sudo, sudo-Passwort wird einmalig abgefragt)";
+    }
+    return "Passwort-Login serverseitig deaktivieren";
+  }
+
+  function hardenButtonLabel(r: ReadinessState): string {
+    if (r.kind === "loading") return "Prüfe …";
+    if (r.kind === "done" && r.value.status === "ready") return "Server härten";
+    return "Härten nicht verfügbar";
+  }
+
+  function onHardenClick(s: Server) {
+    const r = currentReadiness(s);
+    if (r.kind === "done" && r.value.status === "ready") {
+      onHarden(s, r.value);
+    } else if (r.kind === "done" && r.value.status === "unavailable") {
+      toast.error(r.value.reason);
+    } else if (r.kind === "error") {
+      toast.error(r.message);
+    }
+  }
+
+  function showReadinessInfo(s: Server) {
+    const r = currentReadiness(s);
+    if (r.kind === "done" && r.value.status === "unavailable") {
+      toast.error(r.value.reason);
+    } else if (r.kind === "error") {
+      toast.error(r.message);
+    }
   }
 
   type AuthState = "password" | "key-unhardened" | "hardened";
@@ -72,17 +143,40 @@
   </ul>
 
   {#if app.selectedServer}
+    {@const sel = app.selectedServer}
+    {@const rd = currentReadiness(sel)}
     <div class="actions">
-      <button onclick={() => onDeploy(app.selectedServer!)}>SSH-Key deployen</button>
-      {#if app.selectedServer.auth.mode === "key" && !app.selectedServer.hardened}
-        <button class="warn" onclick={() => onHarden(app.selectedServer!)} title="Passwort-Login serverseitig deaktivieren">
-          🛡 Server härten
-        </button>
+      <button onclick={() => onDeploy(sel)}>SSH-Key deployen</button>
+      {#if sel.auth.mode === "key" && !sel.hardened}
+        {@const ready = rd.kind === "done" && rd.value.status === "ready"}
+        {@const showInfo =
+          (rd.kind === "done" && rd.value.status === "unavailable") || rd.kind === "error"}
+        <div class="harden-row">
+          <button
+            class="warn harden-btn"
+            disabled={!ready}
+            onclick={() => onHardenClick(sel)}
+            title={hardenButtonTitle(rd)}
+          >
+            🛡 {hardenButtonLabel(rd)}
+          </button>
+          {#if showInfo}
+            <button
+              type="button"
+              class="info-btn"
+              onclick={() => showReadinessInfo(sel)}
+              title="Warum ist Härten nicht möglich?"
+              aria-label="Details anzeigen"
+            >
+              ⓘ
+            </button>
+          {/if}
+        </div>
       {/if}
-      <button onclick={() => onEdit(app.selectedServer!)}>
+      <button onclick={() => onEdit(sel)}>
         Bearbeiten
       </button>
-      <button class="danger" onclick={() => onDelete(app.selectedServer!)}>
+      <button class="danger" onclick={() => onDelete(sel)}>
         Löschen…
       </button>
     </div>
@@ -178,6 +272,23 @@
   .actions button.danger { background: #7f1d1d; }
   .actions button.warn { background: #a16207; }
   .actions button:hover { filter: brightness(1.1); }
+  .actions button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .actions button:disabled:hover { filter: none; }
+
+  .harden-row { display: flex; gap: 6px; }
+  .harden-row .harden-btn { flex: 1; }
+  .harden-row .info-btn {
+    flex: 0 0 32px;
+    background: #2a2e37;
+    color: #d1d5db;
+    border: 1px solid #3a3f4b;
+    padding: 0;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 6px;
+  }
+  .harden-row .info-btn:hover { background: #3a3f4b; filter: none; }
 
   .auth {
     display: inline-flex;

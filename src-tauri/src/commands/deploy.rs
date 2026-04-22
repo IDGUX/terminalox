@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
+use crate::ssh::harden::{HardenReadiness, PrivilegeMethod};
 use crate::ssh::{deploy, harden};
 use crate::state::AppState;
 
@@ -27,6 +28,10 @@ pub async fn deploy_key(
     server_id: Uuid,
     key_id: Uuid,
     password: String,
+    // Optional override for sudo during hardening. If None, the SSH
+    // password is reused as the sudo password when the remote user needs
+    // one (typical Debian/Ubuntu case: SSH and sudo passwords are identical).
+    sudo_password: Option<String>,
     assign_to_server: bool,
     state: State<'_, AppState>,
 ) -> AppResult<DeployReport> {
@@ -65,20 +70,42 @@ pub async fn deploy_key(
         }
     };
 
-    // Step 3: Harden (disable password auth via drop-in). Uses same password for sudo.
-    let outcome = harden::harden(key_session, &password).await?;
-    report.dropin_installed = outcome.dropin_installed;
-    report.sshd_validated = outcome.sshd_validated;
-    report.sshd_reloaded = outcome.sshd_reloaded;
-    report.password_auth_confirmed_disabled = outcome.password_auth_confirmed_disabled;
-    report.hardened = outcome.all_ok();
-    if !outcome.all_ok() {
-        let msg = if outcome.stderr.is_empty() {
-            "Härten fehlgeschlagen (kein Detail vom Server)".to_string()
-        } else {
-            format!("Härten fehlgeschlagen: {}", outcome.stderr.trim())
-        };
-        report.warnings.push(msg);
+    // Step 3: Probe privilege. Harden if possible — covers root, NOPASSWD,
+    //         and the standard Debian/Ubuntu case (user in sudo group, needs
+    //         a password). For the password case, we default to reusing the
+    //         SSH password unless the UI provided an explicit override.
+    let readiness = harden::probe_readiness(key_session).await?;
+    match readiness {
+        HardenReadiness::Ready { method } => {
+            // Re-open session — probe_readiness consumed the first one.
+            let harden_session =
+                harden::open_key_session(&host, port, &user, &key_path).await?;
+            let sudo_pw: Option<&str> = match method {
+                PrivilegeMethod::Root | PrivilegeMethod::SudoNopasswd => None,
+                PrivilegeMethod::SudoWithPassword => {
+                    Some(sudo_password.as_deref().unwrap_or(password.as_str()))
+                }
+            };
+            let outcome = harden::harden(harden_session, sudo_pw).await?;
+            report.dropin_installed = outcome.dropin_installed;
+            report.sshd_validated = outcome.sshd_validated;
+            report.sshd_reloaded = outcome.sshd_reloaded;
+            report.password_auth_confirmed_disabled = outcome.password_auth_confirmed_disabled;
+            report.hardened = outcome.all_ok();
+            if !outcome.all_ok() {
+                let msg = if outcome.stderr.is_empty() {
+                    "Härten fehlgeschlagen (kein Detail vom Server)".to_string()
+                } else {
+                    format!("Härten fehlgeschlagen: {}", outcome.stderr.trim())
+                };
+                report.warnings.push(msg);
+            }
+        }
+        HardenReadiness::Unavailable { reason } => {
+            report.warnings.push(format!(
+                "Key ist deployed, aber Härten wurde übersprungen: {reason}"
+            ));
+        }
     }
 
     // Step 4: Update server state in the store.
