@@ -1,5 +1,12 @@
 # terminalox
 
+> **Disclaimer.** terminalox is an experimental open-source side project provided
+> **AS-IS** and is **not developed in the course of a commercial activity**. It is
+> **not intended for production use**. Installers published under Releases are
+> **unsigned**. Use entirely at your own risk; **no warranty**,
+> **no fitness-for-purpose claim**, and **no liability** is accepted to the extent
+> permitted by law. See [LICENSE](LICENSE) for the full MIT terms.
+
 A small cross-platform SSH terminal with **one-click server hardening**.
 
 The use case this was built for: you SSH into a lot of boxes every day, but setting up SSH keys per server is enough friction that you end up typing passwords. terminalox fixes that — add a server once, click **Deployen + Härten**, and the app:
