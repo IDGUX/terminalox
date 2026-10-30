@@ -33,8 +33,12 @@ pub async fn add_server(
         last_used_at: None,
         hardened: false,
         hardened_at: None,
+        folder_id: input.folder_id,
     };
     let mut store = state.store.write().await;
+    if let Some(fid) = server.folder_id {
+        store.find_folder(fid).ok_or(AppError::UnknownFolder)?;
+    }
     store.servers.push(server.clone());
     store.save(&state.store_file())?;
     Ok(server)
@@ -145,6 +149,7 @@ pub async fn delete_server_full(
 
             match unharden_result {
                 Ok(()) => report.remote_unharden_succeeded = true,
+                Err(e @ AppError::HostKey(_)) => return Err(e),
                 Err(e) => {
                     report.remote_unharden_error = Some(e.to_string());
                     if !opts.force {
@@ -188,6 +193,7 @@ pub async fn delete_server_full(
             };
             match result {
                 Ok(()) => report.remote_cleanup_succeeded = true,
+                Err(e @ AppError::HostKey(_)) => return Err(e),
                 Err(e) => {
                     report.remote_cleanup_error = Some(e.to_string());
                     if !opts.force {

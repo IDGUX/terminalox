@@ -2,7 +2,7 @@ use base64::prelude::*;
 use russh::ChannelMsg;
 
 use crate::error::{AppError, AppResult};
-use crate::ssh::client::{self, NoopVerify};
+use crate::ssh::client::{self, KnownHostsVerify};
 
 // Prefix `00-` so the drop-in is loaded before other files in
 // /etc/ssh/sshd_config.d/ (e.g. Ubuntu's 50-cloud-init.conf which sets
@@ -63,7 +63,7 @@ impl HardenOutcome {
 /// exists — enough to distinguish root / NOPASSWD / needs-password / not-allowed.
 /// No password is ever sent by this probe.
 pub async fn probe_readiness(
-    session: russh::client::Handle<NoopVerify>,
+    session: russh::client::Handle<KnownHostsVerify>,
 ) -> AppResult<HardenReadiness> {
     // Emit structured lines; capture sudo -n's stderr into a base64-encoded line
     // so we can inspect it without worrying about newlines / escaping.
@@ -158,7 +158,7 @@ fi
 /// for the rest. Everything happens in a single channel = single TTY, so the
 /// credential cache stays valid throughout. Self-rolls-back on any failure.
 pub async fn harden(
-    session: russh::client::Handle<NoopVerify>,
+    session: russh::client::Handle<KnownHostsVerify>,
     sudo_password: Option<&str>,
 ) -> AppResult<HardenOutcome> {
     let script = build_harden_script(sudo_password);
@@ -175,8 +175,49 @@ pub async fn harden(
     Ok(outcome)
 }
 
+/// Re-check the live hardening state on the remote.
+/// Read-only; never writes to the server. Combines:
+///   1. drop-in file present at the expected path
+///   2. drop-in content still contains `PasswordAuthentication no`
+///   3. (when sudo is available) `sshd -T` confirms effective `PasswordAuthentication no`
+/// The third check is the ground truth; the first two are cheap and
+/// don't require privileges, so we always do them and surface them
+/// separately for clear diagnostics.
+pub async fn verify(
+    session: russh::client::Handle<KnownHostsVerify>,
+    sudo_password: Option<&str>,
+) -> AppResult<VerifyOutcome> {
+    let script = build_verify_script(sudo_password);
+    let (_exit, stdout, _stderr) = exec_collect(session, &script, "").await?;
+    Ok(parse_verify_stdout(&stdout))
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct VerifyOutcome {
+    pub dropin_present: bool,
+    pub dropin_content_intact: bool,
+    /// `Some(true)` = effective PasswordAuthentication is `no` (server is locked down).
+    /// `Some(false)` = effective PasswordAuthentication is `yes` (drift!).
+    /// `None` = couldn't determine (no sudo / sshd -T unavailable).
+    pub effective_password_auth_off: Option<bool>,
+    pub effective_check_error: Option<String>,
+}
+
+impl VerifyOutcome {
+    /// Conservative verdict: prefer the effective check when present, otherwise
+    /// trust the drop-in file. Either signal showing "not hardened" wins.
+    pub fn is_hardened(&self) -> bool {
+        if self.effective_password_auth_off == Some(false) {
+            return false;
+        }
+        self.dropin_present
+            && self.dropin_content_intact
+            && self.effective_password_auth_off != Some(false)
+    }
+}
+
 pub async fn unharden(
-    session: russh::client::Handle<NoopVerify>,
+    session: russh::client::Handle<KnownHostsVerify>,
     sudo_password: Option<&str>,
 ) -> AppResult<()> {
     let script = build_unharden_script(sudo_password);
@@ -238,6 +279,62 @@ set -u
 {prelude}
 DROPIN='{path}'
 STAGE="$DROPIN.terminalox.new"
+INCLUDE_WAS_ADDED=0
+
+# --- Reload sshd. Tries systemd, SysV-init, and OpenRC. -------------------
+reload_sshd() {{
+  for svc in ssh sshd; do
+    if $SUDO systemctl reload "$svc" 2>/dev/null; then return 0; fi
+  done
+  for svc in ssh sshd; do
+    if $SUDO service "$svc" reload 2>/dev/null; then return 0; fi
+  done
+  # OpenRC (Alpine/Gentoo). Reload action may be absent → try restart.
+  for svc in sshd ssh; do
+    if $SUDO rc-service "$svc" reload 2>/dev/null; then return 0; fi
+    if $SUDO rc-service "$svc" restart 2>/dev/null; then return 0; fi
+  done
+  return 1
+}}
+
+# --- Revert the include marker block we may have appended. ---------------
+revert_include() {{
+  if [ "$INCLUDE_WAS_ADDED" -ne 1 ]; then return 0; fi
+  $SUDO awk '/# BEGIN_TERMINALOX_INCLUDE/{{skip=1; next}} /# END_TERMINALOX_INCLUDE/{{skip=0; next}} !skip' /etc/ssh/sshd_config \
+    | $SUDO tee /etc/ssh/sshd_config.terminalox.new >/dev/null
+  $SUDO chmod 644 /etc/ssh/sshd_config.terminalox.new
+  $SUDO mv /etc/ssh/sshd_config.terminalox.new /etc/ssh/sshd_config
+}}
+
+# --- Full rollback: drop-in away, include marker away, reload. ------------
+rollback() {{
+  $SUDO rm -f "$DROPIN"
+  revert_include
+  reload_sshd >/dev/null 2>&1 || true
+}}
+
+# Step 0: ensure the drop-in directory is honored by sshd.
+# Modern distros (Debian 11+, Ubuntu 20.04+, Fedora, RHEL/Rocky/Alma 8+)
+# include /etc/ssh/sshd_config.d/*.conf out of the box. Older or custom
+# sshd_config files may lack the Include directive — without it, our
+# drop-in is silently ignored.
+if ! $SUDO grep -qE '^[[:space:]]*Include[[:space:]]+.*sshd_config\.d' /etc/ssh/sshd_config 2>/dev/null; then
+  if ! $SUDO grep -q '# BEGIN_TERMINALOX_INCLUDE' /etc/ssh/sshd_config 2>/dev/null; then
+    if $SUDO tee -a /etc/ssh/sshd_config >/dev/null <<EOF_INC
+
+# BEGIN_TERMINALOX_INCLUDE
+# Added by terminalox so /etc/ssh/sshd_config.d/*.conf is honored.
+# Removed automatically when the server is unhardened.
+Include /etc/ssh/sshd_config.d/*.conf
+# END_TERMINALOX_INCLUDE
+EOF_INC
+    then
+      INCLUDE_WAS_ADDED=1
+      echo 'STEP:include_added'
+    fi
+  fi
+fi
+
 $SUDO mkdir -p /etc/ssh/sshd_config.d
 echo '{content}' | base64 -d | $SUDO tee "$STAGE" >/dev/null
 $SUDO chmod 644 "$STAGE"
@@ -245,38 +342,26 @@ $SUDO chmod 644 "$STAGE"
 $SUDO mv "$STAGE" "$DROPIN"
 echo 'STEP:dropin_installed'
 
-# Validate full sshd config
+# Validate full sshd config (drop-in + maybe new include).
 if ! $SUDO sshd -t 2>&1; then
-  $SUDO rm -f "$DROPIN"
+  rollback
   echo 'STEP:validation_failed' >&2
   exit 2
 fi
 echo 'STEP:sshd_validated'
 
-# Reload (try known service names)
-reload_ok=0
-for svc in ssh sshd; do
-  if $SUDO systemctl reload "$svc" 2>/dev/null; then reload_ok=1; break; fi
-done
-if [ "$reload_ok" -eq 0 ]; then
-  for svc in ssh sshd; do
-    if $SUDO service "$svc" reload 2>/dev/null; then reload_ok=1; break; fi
-  done
-fi
-if [ "$reload_ok" -eq 0 ]; then
-  $SUDO rm -f "$DROPIN"
+if ! reload_sshd; then
+  rollback
   echo 'STEP:reload_failed' >&2
   exit 3
 fi
 echo 'STEP:sshd_reloaded'
 
-# Verify effective config
+# Verify effective config — ground truth.
 if $SUDO sshd -T 2>/dev/null | grep -qiE '^passwordauthentication no'; then
   echo 'STEP:password_auth_off'
 else
-  # undo
-  $SUDO rm -f "$DROPIN"
-  for svc in ssh sshd; do $SUDO systemctl reload "$svc" 2>/dev/null || $SUDO service "$svc" reload 2>/dev/null; done
+  rollback
   echo 'STEP:password_auth_verify_failed' >&2
   exit 4
 fi
@@ -293,18 +378,136 @@ fn build_unharden_script(sudo_password: Option<&str>) -> String {
         r#"bash -s <<'TERMINALOX_EOF'
 set -u
 {prelude}
+
+# Remove our drop-in files (current + legacy path).
 for f in '{path}' '{legacy}'; do
   if [ -f "$f" ]; then $SUDO rm -f "$f"; fi
 done
+
+# If we previously added an Include directive, remove the marker block.
+if $SUDO grep -q '# BEGIN_TERMINALOX_INCLUDE' /etc/ssh/sshd_config 2>/dev/null; then
+  $SUDO awk '/# BEGIN_TERMINALOX_INCLUDE/{{skip=1; next}} /# END_TERMINALOX_INCLUDE/{{skip=0; next}} !skip' /etc/ssh/sshd_config \
+    | $SUDO tee /etc/ssh/sshd_config.terminalox.new >/dev/null
+  $SUDO chmod 644 /etc/ssh/sshd_config.terminalox.new
+  $SUDO mv /etc/ssh/sshd_config.terminalox.new /etc/ssh/sshd_config
+fi
+
+# Reload sshd via whatever init system is available.
 for svc in ssh sshd; do $SUDO systemctl reload "$svc" 2>/dev/null && exit 0; done
 for svc in ssh sshd; do $SUDO service "$svc" reload 2>/dev/null && exit 0; done
-# If no reload worked, still report success — drop-ins are gone, new sshd behavior will apply on next config read.
+for svc in sshd ssh; do
+  $SUDO rc-service "$svc" reload 2>/dev/null && exit 0
+  $SUDO rc-service "$svc" restart 2>/dev/null && exit 0
+done
+# If no reload worked, still report success — drop-ins are gone, new sshd
+# behavior will apply on the next config read.
 exit 0
 TERMINALOX_EOF"#,
         prelude = prelude,
         path = DROPIN_PATH,
         legacy = LEGACY_DROPIN_PATH
     )
+}
+
+/// Verify script. Stays read-only and survives missing sudo:
+///   - File check via `test -f` + content grep run unprivileged
+///   - `sshd -T` is best-effort: if no privilege path, we just skip it
+fn build_verify_script(sudo_password: Option<&str>) -> String {
+    // We DON'T want the prelude to hard-exit if no sudo — verify must keep
+    // running even on a non-sudo user. Build a softer variant inline.
+    let pw_b64 = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
+    format!(
+        r#"bash -s <<'TERMINALOX_EOF'
+set -u
+DROPIN='{path}'
+
+# 1) Drop-in file
+if [ -f "$DROPIN" ]; then
+  echo 'DROPIN:present'
+  if grep -qiE '^[[:space:]]*PasswordAuthentication[[:space:]]+no[[:space:]]*$' "$DROPIN" 2>/dev/null; then
+    echo 'DROPIN_CONTENT:intact'
+  else
+    echo 'DROPIN_CONTENT:tampered'
+  fi
+else
+  echo 'DROPIN:missing'
+fi
+
+# 2) Effective sshd config — best effort, needs root/sudo
+SUDO_PW_B64='{pw_b64}'
+HAVE_PRIV=0
+SUDO_VERIFY=""
+if [ "$(id -u)" -eq 0 ]; then
+  HAVE_PRIV=1
+elif command -v sudo >/dev/null 2>&1; then
+  if sudo -n true 2>/dev/null; then
+    HAVE_PRIV=1
+    SUDO_VERIFY="sudo -n"
+  elif [ -n "$SUDO_PW_B64" ]; then
+    __SUDO_PW=$(printf '%s' "$SUDO_PW_B64" | base64 -d)
+    if sudo -S -p '' -v 2>/dev/null <<EOF_PW
+$__SUDO_PW
+EOF_PW
+    then
+      HAVE_PRIV=1
+      SUDO_VERIFY="sudo -n"
+    else
+      echo 'EFFECTIVE:skipped:sudo_auth_failed'
+    fi
+    unset __SUDO_PW SUDO_PW_B64
+  else
+    echo 'EFFECTIVE:skipped:needs_sudo_password'
+  fi
+else
+  echo 'EFFECTIVE:skipped:no_sudo'
+fi
+
+if [ "$HAVE_PRIV" -eq 1 ]; then
+  effective=$($SUDO_VERIFY sshd -T 2>/dev/null | awk 'tolower($1)=="passwordauthentication"{{print tolower($2); exit}}')
+  if [ -z "$effective" ]; then
+    echo 'EFFECTIVE:unknown'
+  elif [ "$effective" = "no" ]; then
+    echo 'EFFECTIVE:off'
+  else
+    echo "EFFECTIVE:on:$effective"
+  fi
+fi
+TERMINALOX_EOF"#,
+        path = DROPIN_PATH,
+        pw_b64 = pw_b64
+    )
+}
+
+fn parse_verify_stdout(stdout: &str) -> VerifyOutcome {
+    let mut o = VerifyOutcome::default();
+    for line in stdout.lines() {
+        let line = line.trim();
+        match line {
+            "DROPIN:present" => o.dropin_present = true,
+            "DROPIN:missing" => o.dropin_present = false,
+            "DROPIN_CONTENT:intact" => o.dropin_content_intact = true,
+            "DROPIN_CONTENT:tampered" => o.dropin_content_intact = false,
+            "EFFECTIVE:off" => o.effective_password_auth_off = Some(true),
+            s if s.starts_with("EFFECTIVE:on") => o.effective_password_auth_off = Some(false),
+            "EFFECTIVE:unknown" => {
+                o.effective_check_error =
+                    Some("sshd -T lieferte keinen PasswordAuthentication-Wert".into());
+            }
+            s if s.starts_with("EFFECTIVE:skipped:") => {
+                let reason = s.trim_start_matches("EFFECTIVE:skipped:");
+                o.effective_check_error = Some(match reason {
+                    "no_sudo" => "Kein sudo verfügbar — Effektiv-Check übersprungen".into(),
+                    "needs_sudo_password" => {
+                        "Effektiv-Check braucht ein sudo-Passwort".into()
+                    }
+                    "sudo_auth_failed" => "sudo hat das Passwort abgelehnt".into(),
+                    other => format!("Effektiv-Check übersprungen: {other}"),
+                });
+            }
+            _ => {}
+        }
+    }
+    o
 }
 
 fn parse_harden_stdout(stdout: &str, stderr: String) -> HardenOutcome {
@@ -325,7 +528,7 @@ fn parse_harden_stdout(stdout: &str, stderr: String) -> HardenOutcome {
 }
 
 async fn exec_collect(
-    session: russh::client::Handle<NoopVerify>,
+    session: russh::client::Handle<KnownHostsVerify>,
     script: &str,
     stdin_bytes: &str,
 ) -> AppResult<(u32, String, String)> {
@@ -366,7 +569,7 @@ pub async fn open_key_session(
     port: u16,
     user: &str,
     key_path: &str,
-) -> AppResult<russh::client::Handle<NoopVerify>> {
+) -> AppResult<russh::client::Handle<KnownHostsVerify>> {
     let mut session = client::connect(host, port).await?;
     client::auth_key(&mut session, user, key_path).await?;
     Ok(session)

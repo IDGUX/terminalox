@@ -152,8 +152,13 @@
   }
 </script>
 
-<div class="overlay" onclick={onClose}>
-  <div class="dialog" onclick={(e) => e.stopPropagation()}>
+<svelte:window
+  onkeydown={(e) => e.key === "Escape" && !(exporting || importing) && onClose()}
+/>
+
+<!-- Kein Schließen per Klick daneben: ein verirrter Klick würde alle Eingaben verwerfen. -->
+<div class="overlay">
+  <div class="dialog">
     {#if mode === "export"}
       <h3>Backup erstellen</h3>
 

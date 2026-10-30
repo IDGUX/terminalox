@@ -13,7 +13,7 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::keygen;
-use crate::models::{KeyInfo, Server};
+use crate::models::{Folder, KeyInfo, Server};
 use crate::state::AppState;
 
 pub const EXPORT_VERSION: u32 = 1;
@@ -37,6 +37,9 @@ struct BackupPayload {
     source_platform: String,
     servers: Vec<Server>,
     keys: Vec<KeyBundle>,
+    /// Missing in backups from before folders existed.
+    #[serde(default)]
+    folders: Vec<Folder>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,6 +160,7 @@ pub async fn export_backup(
         source_platform: current_platform(),
         servers: store.servers.clone(),
         keys: bundles,
+        folders: store.folders.clone(),
     };
 
     let envelope = match passphrase.as_deref() {
@@ -323,6 +327,15 @@ pub async fn import_backup(
         }
     }
 
+    // ---- Folders (before servers, so folder_id refs resolve). ----
+    for folder in payload.folders {
+        match store.folders.iter().position(|f| f.id == folder.id) {
+            Some(idx) if opts.replace_existing => store.folders[idx] = folder,
+            Some(_) => {}
+            None => store.folders.push(folder),
+        }
+    }
+
     // ---- Servers. ----
     for server in payload.servers {
         let existing = store.servers.iter().position(|s| s.id == server.id);
@@ -339,6 +352,7 @@ pub async fn import_backup(
         }
     }
 
+    store.clear_dangling_folder_refs();
     store.save(&state.store_file())?;
     Ok(report)
 }

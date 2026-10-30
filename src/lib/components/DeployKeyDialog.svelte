@@ -49,8 +49,13 @@
   }
 </script>
 
-<div class="overlay" onclick={onClose}>
-  <form class="dialog" onclick={(e) => e.stopPropagation()} onsubmit={submit}>
+<svelte:window
+  onkeydown={(e) => e.key === "Escape" && !(submitting) && onClose()}
+/>
+
+<!-- Kein Schließen per Klick daneben: ein verirrter Klick würde alle Eingaben verwerfen. -->
+<div class="overlay">
+  <form class="dialog" onsubmit={submit}>
     {#if !report}
       <h3>SSH-Key auf {server.name} deployen &amp; härten</h3>
       <p class="hint">
