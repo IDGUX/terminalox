@@ -7,14 +7,15 @@
   import DeployKeyDialog from "$lib/components/DeployKeyDialog.svelte";
   import DeleteServerDialog from "$lib/components/DeleteServerDialog.svelte";
   import HardenServerDialog from "$lib/components/HardenServerDialog.svelte";
-  import TerminalView from "$lib/components/TerminalView.svelte";
+  import TerminalSplitView from "$lib/components/TerminalSplitView.svelte";
   import KeysView from "$lib/components/KeysView.svelte";
   import BackupDialog from "$lib/components/BackupDialog.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
+  import HostKeyDialog from "$lib/components/HostKeyDialog.svelte";
   import { app } from "$lib/stores/app.svelte";
-  import type { HardenReadiness, Server } from "$lib/types";
+  import type { HardenReadiness, Server, Uuid } from "$lib/types";
 
-  let showAdd = $state(false);
+  let addDialog = $state<{ folderId: Uuid | null; template: Server | null } | null>(null);
   let editFor = $state<Server | null>(null);
   let deployFor = $state<Server | null>(null);
   let hardenFor = $state<
@@ -42,7 +43,8 @@
       <div class="splash error">Fehler beim Laden: {loadError}</div>
     {:else if app.view === "servers"}
       <Sidebar
-        onAdd={() => (showAdd = true)}
+        onAdd={(folderId) => (addDialog = { folderId: folderId ?? null, template: null })}
+        onDuplicate={(s) => (addDialog = { folderId: null, template: s })}
         onEdit={(s) => (editFor = s)}
         onDeploy={(s) => (deployFor = s)}
         onHarden={(s, r) => (hardenFor = { server: s, readiness: r })}
@@ -53,7 +55,7 @@
       <main class="main">
         {#if app.selectedServer}
           {#key app.selectedServer.id}
-            <TerminalView server={app.selectedServer} />
+            <TerminalSplitView server={app.selectedServer} />
           {/key}
         {:else}
           <div class="splash">
@@ -72,8 +74,12 @@
     {/if}
   </div>
 
-  {#if showAdd}
-    <AddServerDialog onClose={() => (showAdd = false)} />
+  {#if addDialog}
+    <AddServerDialog
+      folderId={addDialog.folderId}
+      template={addDialog.template}
+      onClose={() => (addDialog = null)}
+    />
   {/if}
   {#if editFor}
     <EditServerDialog server={editFor} onClose={() => (editFor = null)} />
@@ -95,6 +101,7 @@
     <BackupDialog mode={backupMode} onClose={() => (backupMode = null)} />
   {/if}
 
+  <HostKeyDialog />
   <Toasts />
 </div>
 

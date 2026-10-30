@@ -1,22 +1,38 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { Terminal } from "@xterm/xterm";
+  import { Terminal, type IDisposable } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import "@xterm/xterm/css/xterm.css";
   import { api } from "$lib/api";
+  import { isAppShortcut } from "$lib/shortcuts";
   import { app } from "$lib/stores/app.svelte";
   import type { Server, SessionClosedEvent, SessionDataEvent } from "$lib/types";
 
-  let { server }: { server: Server } = $props();
+  let {
+    server,
+    onSplit,
+    onClose,
+    canSplit = false,
+    canClose = false,
+  }: {
+    server: Server;
+    onSplit?: () => void;
+    onClose?: () => void;
+    canSplit?: boolean;
+    canClose?: boolean;
+  } = $props();
 
   let host: HTMLDivElement;
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
+  let resizeObserver: ResizeObserver | null = null;
   let sessionId: string | null = null;
   let unlistenData: UnlistenFn | null = null;
   let unlistenClosed: UnlistenFn | null = null;
+  let onDataDisposable: IDisposable | null = null;
+  let onResizeDisposable: IDisposable | null = null;
   let status = $state<"connecting" | "connected" | "closed" | "error">("connecting");
   let statusDetail = $state<string>("");
   let passwordPrompt = $state<string | null>(null);
@@ -33,6 +49,24 @@
     let bin = "";
     for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
     return btoa(bin);
+  }
+
+  async function teardownSession() {
+    unlistenData?.();
+    unlistenData = null;
+    unlistenClosed?.();
+    unlistenClosed = null;
+    onDataDisposable?.dispose();
+    onDataDisposable = null;
+    onResizeDisposable?.dispose();
+    onResizeDisposable = null;
+    const sid = sessionId;
+    sessionId = null;
+    if (sid) {
+      try {
+        await api.closeSession(sid);
+      } catch {}
+    }
   }
 
   async function start(password: string | null) {
@@ -60,6 +94,7 @@
     }
 
     app.activeSessionId = sessionId;
+    app.markUsed(server.id);
     status = "connected";
     passwordPrompt = null;
 
@@ -76,16 +111,33 @@
           : "Verbindung beendet";
     });
 
-    term.onData((str) => {
+    onDataDisposable = term.onData((str) => {
       if (!sessionId) return;
       const bytes = new TextEncoder().encode(str);
       api.writeSession(sessionId, encode(bytes)).catch(() => {});
     });
 
-    term.onResize(({ cols, rows }) => {
+    onResizeDisposable = term.onResize(({ cols, rows }) => {
       if (!sessionId) return;
       api.resizeSession(sessionId, cols, rows).catch(() => {});
     });
+  }
+
+  async function reconnect() {
+    await teardownSession();
+    if (server.auth.mode === "password") {
+      passwordPrompt = "Passwort erforderlich";
+      status = "connecting";
+      statusDetail = "";
+    } else {
+      await start(null);
+    }
+  }
+
+  async function disconnect() {
+    await teardownSession();
+    status = "closed";
+    statusDetail = "Manuell getrennt";
   }
 
   async function submitPassword(e: Event) {
@@ -114,9 +166,18 @@
     fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    // ⌘K (Strg+Shift+K) leert Bildschirm + Scrollback wie in Terminal.app/iTerm;
+    // die aktuelle Prompt-Zeile bleibt stehen.
+    term.attachCustomKeyEventHandler((e) => {
+      if (!isAppShortcut(e, "k")) return true;
+      if (e.type === "keydown") term?.clear();
+      return false;
+    });
     term.open(host);
     fit.fit();
     window.addEventListener("resize", resize);
+    resizeObserver = new ResizeObserver(() => fit?.fit());
+    resizeObserver.observe(host);
 
     if (server.auth.mode === "password") {
       passwordPrompt = "Passwort erforderlich";
@@ -127,11 +188,9 @@
 
   onDestroy(() => {
     window.removeEventListener("resize", resize);
-    unlistenData?.();
-    unlistenClosed?.();
-    if (sessionId) {
-      api.closeSession(sessionId).catch(() => {});
-    }
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    teardownSession();
     term?.dispose();
   });
 </script>
@@ -142,8 +201,47 @@
       <strong>{server.name}</strong>
       <span class="muted">{server.user}@{server.host}{server.port !== 22 ? `:${server.port}` : ""}</span>
     </div>
-    <div class="status" class:ok={status === "connected"} class:bad={status === "error" || status === "closed"}>
-      {status}{statusDetail ? ` — ${statusDetail}` : ""}
+    <div class="actions">
+      <button
+        type="button"
+        class="hbtn"
+        onclick={reconnect}
+        title="Erneut verbinden"
+        aria-label="Erneut verbinden"
+      >↻</button>
+      <button
+        type="button"
+        class="hbtn"
+        onclick={disconnect}
+        disabled={status !== "connected" && status !== "connecting"}
+        title="Verbindung beenden"
+        aria-label="Verbindung beenden"
+      >⏻</button>
+      {#if canSplit && onSplit}
+        <button
+          type="button"
+          class="hbtn"
+          onclick={onSplit}
+          title="Neues Terminal (Split)"
+          aria-label="Neues Terminal"
+        >＋</button>
+      {/if}
+      {#if canClose && onClose}
+        <button
+          type="button"
+          class="hbtn close"
+          onclick={onClose}
+          title="Diesen Bereich schließen"
+          aria-label="Bereich schließen"
+        >✕</button>
+      {/if}
+      <div
+        class="status"
+        class:ok={status === "connected"}
+        class:bad={status === "error" || status === "closed"}
+      >
+        {status}{statusDetail ? ` — ${statusDetail}` : ""}
+      </div>
     </div>
   </div>
 
@@ -180,24 +278,72 @@
     flex-direction: column;
     position: relative;
     background: #0d1017;
+    min-height: 0;
+    min-width: 0;
+    border: 1px solid #1f232b;
+    border-radius: 4px;
+    overflow: hidden;
   }
   .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 14px;
+    padding: 6px 10px;
     background: #151923;
     border-bottom: 1px solid #2a2e37;
     color: #d1d5db;
     font-size: 13px;
+    gap: 8px;
+  }
+  .title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .muted { color: #6b7280; margin-left: 8px; font-size: 12px; }
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .hbtn {
+    background: transparent;
+    border: 1px solid #2a2e37;
+    color: #9ca3af;
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    padding: 0;
+  }
+  .hbtn:hover:not(:disabled) {
+    background: #1f232b;
+    color: #e5e7eb;
+    border-color: #3a3f4a;
+  }
+  .hbtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .hbtn.close:hover { color: #f87171; border-color: #4a2222; }
   .status {
     font-size: 11px;
     color: #9ca3af;
     padding: 2px 8px;
     border-radius: 10px;
     background: #1f232b;
+    margin-left: 4px;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .status.ok { color: #34d399; background: #052e26; }
   .status.bad { color: #f87171; background: #2d1212; }

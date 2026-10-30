@@ -1,7 +1,9 @@
 pub mod backup;
 pub mod config;
 pub mod deploy;
+pub mod folders;
 pub mod harden;
+pub mod hostkeys;
 pub mod keys;
 pub mod servers;
 pub mod session;

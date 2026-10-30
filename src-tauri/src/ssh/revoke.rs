@@ -1,13 +1,13 @@
 use russh::ChannelMsg;
 
 use crate::error::{AppError, AppResult};
-use crate::ssh::client::{self, NoopVerify};
+use crate::ssh::client::{self, KnownHostsVerify};
 
 /// Remove a specific public key line from `~/.ssh/authorized_keys` on the remote host.
 ///
 /// Matches exact-line (grep -vxF) to avoid clobbering similar-but-distinct keys.
 pub async fn revoke_on_authenticated(
-    session: russh::client::Handle<NoopVerify>,
+    session: russh::client::Handle<KnownHostsVerify>,
     public_key_openssh: &str,
 ) -> AppResult<()> {
     let key_line = public_key_openssh.trim();

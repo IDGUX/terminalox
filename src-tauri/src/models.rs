@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,10 +36,29 @@ pub struct Server {
     pub hardened: bool,
     #[serde(default)]
     pub hardened_at: Option<DateTime<Utc>>,
+    /// Sidebar folder; None = "Ohne Ordner".
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
 }
 
 fn default_port() -> u16 {
     22
+}
+
+/// Plain serde maps both a missing field and `null` to None; this keeps `null` as Some(None).
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +72,8 @@ pub struct NewServerInput {
     pub color: Option<String>,
     #[serde(default)]
     pub auth: AuthMode,
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +83,8 @@ pub struct UpdateServerInput {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
+    /// Missing = unchanged, null = remove color.
+    #[serde(default, deserialize_with = "double_option")]
     pub color: Option<Option<String>>,
     pub auth: Option<AuthMode>,
 }

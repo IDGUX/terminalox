@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::AppResult;
-use crate::models::{KeyInfo, Server};
+use crate::models::{Folder, KeyInfo, Server};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
@@ -12,6 +12,8 @@ pub struct Store {
     pub servers: Vec<Server>,
     #[serde(default)]
     pub keys: Vec<KeyInfo>,
+    #[serde(default)]
+    pub folders: Vec<Folder>,
 }
 
 impl Store {
@@ -43,6 +45,20 @@ impl Store {
 
     pub fn find_server_mut(&mut self, id: Uuid) -> Option<&mut Server> {
         self.servers.iter_mut().find(|s| s.id == id)
+    }
+
+    pub fn find_folder(&self, id: Uuid) -> Option<&Folder> {
+        self.folders.iter().find(|f| f.id == id)
+    }
+
+    /// Server, deren Ordner nicht (mehr) existiert, landen wieder in "Ohne Ordner".
+    pub fn clear_dangling_folder_refs(&mut self) {
+        let ids: Vec<Uuid> = self.folders.iter().map(|f| f.id).collect();
+        for s in &mut self.servers {
+            if matches!(s.folder_id, Some(id) if !ids.contains(&id)) {
+                s.folder_id = None;
+            }
+        }
     }
 
     pub fn find_key(&self, id: Uuid) -> Option<&KeyInfo> {

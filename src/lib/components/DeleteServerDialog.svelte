@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import type { Server, Uuid } from "$lib/types";
 
@@ -22,17 +22,29 @@
   let submitting = $state(false);
   let error = $state<string | null>(null);
   let needsForcePrompt = $state(false);
+  let needsSudoRetry = $state(false);
   let remoteErrorMsg = $state<string | null>(null);
 
+  const isRoot = server.user === "root";
   const hasKeyAuth = server.auth.mode === "key";
-  // Password is needed when either:
-  //   - server is on password auth → used to log in for cleanup
-  //   - server is hardened → used as sudo password for unharden (Debian/Ubuntu default)
-  const needsCleanupPassword = cleanupRemote && server.auth.mode === "password";
-  const needsSudoPassword = cleanupRemote && server.hardened;
-  const needsPassword = needsCleanupPassword || needsSudoPassword;
+
+  // Login-Passwort: nur wirklich nötig bei Passwort-Auth (sonst loggt der Key ein).
+  const needsCleanupPassword = $derived(cleanupRemote && server.auth.mode === "password");
+  // Sudo-Passwort beim Unharden: für root und passwordless-sudo unbenutzt.
+  // Wir zeigen das Feld optional nur für non-root + key-auth + hardened.
+  const showsOptionalSudoField = $derived(
+    cleanupRemote && server.hardened && hasKeyAuth && !isRoot,
+  );
+  const showPasswordField = $derived(needsCleanupPassword || showsOptionalSudoField);
+  const passwordRequired = $derived(needsCleanupPassword);
+
+  function isSudoAuthError(msg: string | null): boolean {
+    if (!msg) return false;
+    return msg.includes("sudo_auth_failed") || msg.includes("sudo_password_required");
+  }
 
   async function callDelete(force: boolean) {
+    const trimmed = password.trim();
     const opts: {
       id: Uuid;
       cleanupRemote: boolean;
@@ -43,7 +55,9 @@
       id: server.id,
       cleanupRemote,
       password: needsCleanupPassword ? password : null,
-      sudoPassword: needsSudoPassword ? password : null,
+      // sudoPassword: nur senden, falls Feld sichtbar UND etwas eingegeben.
+      // Script ignoriert es ohnehin bei root/NOPASSWD sudo.
+      sudoPassword: showsOptionalSudoField && trimmed.length > 0 ? password : null,
       force,
     };
     return (await invoke<DeleteReport>("delete_server_full", { opts })) as DeleteReport;
@@ -66,8 +80,16 @@
       const report = await callDelete(false);
       if (!report.serverRemoved) {
         if (report.remoteUnhardenAttempted && !report.remoteUnhardenSucceeded) {
-          remoteErrorMsg =
-            "Unharden fehlgeschlagen: " + (report.remoteUnhardenError ?? "unbekannt");
+          const errMsg = report.remoteUnhardenError ?? "unbekannt";
+          // Bei sudo-Auth-Fehler: kein "Force"-Pfad, sondern Passwort-Retry.
+          if (isSudoAuthError(errMsg) && hasKeyAuth) {
+            remoteErrorMsg =
+              "Der Remote-User braucht ein sudo-Passwort, um das Hardening rückgängig zu machen.";
+            password = "";
+            needsSudoRetry = true;
+            return;
+          }
+          remoteErrorMsg = "Unharden fehlgeschlagen: " + errMsg;
           needsForcePrompt = true;
           return;
         }
@@ -77,6 +99,41 @@
           needsForcePrompt = true;
           return;
         }
+      }
+      await finish();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function retryWithSudoPassword(e: Event) {
+    e.preventDefault();
+    if (!password.trim()) return;
+    error = null;
+    submitting = true;
+    try {
+      const opts = {
+        id: server.id,
+        cleanupRemote,
+        password: null,
+        sudoPassword: password,
+        force: false,
+      };
+      const report = await invoke<DeleteReport>("delete_server_full", { opts });
+      if (!report.serverRemoved) {
+        const errMsg =
+          report.remoteUnhardenError ?? report.remoteCleanupError ?? "unbekannt";
+        // Falls Passwort wieder falsch: drin bleiben, Hinweis zeigen.
+        if (isSudoAuthError(errMsg)) {
+          error = "Passwort wurde von sudo abgelehnt.";
+          return;
+        }
+        remoteErrorMsg = "Remote-Cleanup fehlgeschlagen: " + errMsg;
+        needsSudoRetry = false;
+        needsForcePrompt = true;
+        return;
       }
       await finish();
     } catch (e) {
@@ -100,24 +157,59 @@
   }
 </script>
 
-<div class="overlay" onclick={onClose}>
-  <form class="dialog" onclick={(e) => e.stopPropagation()} onsubmit={submit}>
+<svelte:window
+  onkeydown={(e) => e.key === "Escape" && !(submitting) && onClose()}
+/>
+
+<!-- Kein Schließen per Klick daneben: ein verirrter Klick würde alle Eingaben verwerfen. -->
+<div class="overlay">
+  <form class="dialog" onsubmit={submit}>
     <h3>Server „{server.name}" löschen?</h3>
     <p class="meta">{server.user}@{server.host}{server.port !== 22 ? `:${server.port}` : ""}</p>
 
-    {#if !needsForcePrompt}
+    {#if needsSudoRetry}
+      <p class="body">
+        {remoteErrorMsg}
+      </p>
+      <label>
+        sudo-Passwort für {server.user}@{server.host}
+        <input
+          type="password"
+          bind:value={password}
+          autocomplete="current-password"
+          autofocus
+        />
+        <span class="hint">Wird nicht gespeichert.</span>
+      </label>
+
+      {#if error}<p class="error">{error}</p>{/if}
+
+      <div class="buttons">
+        <button type="button" onclick={onClose}>Abbrechen</button>
+        <button
+          type="button"
+          class="danger"
+          disabled={submitting || !password.trim()}
+          onclick={retryWithSudoPassword}
+        >
+          {submitting ? "…" : "Erneut versuchen"}
+        </button>
+      </div>
+    {:else if !needsForcePrompt}
       <p class="body">
         Lokal werden Server-Eintrag und — falls kein anderer Server ihn nutzt —
         der zugehörige SSH-Key (Datei in <code>~/.ssh/</code> und Eintrag) entfernt.
         <code>~/.ssh/config</code> wird aktualisiert.
       </p>
 
-      {#if server.hardened}
+      {#if server.hardened && cleanupRemote}
         <p class="body revert">
           🛡 Dieser Server ist gehärtet. Beim Remote-Cleanup wird zuerst das Drop-in
           <code>/etc/ssh/sshd_config.d/00-terminalox.conf</code> gelöscht und
           <code>sshd</code> reloaded — damit ist Passwort-Login wieder möglich.
-          Falls der Remote-User sudo mit Passwort nutzt, wird das unten eingegebene Passwort verwendet.
+          {#if isRoot}
+            Als <code>root</code> ist dafür kein Passwort nötig.
+          {/if}
         </p>
       {/if}
 
@@ -128,17 +220,27 @@
         </label>
       {/if}
 
-      {#if needsPassword}
+      {#if showPasswordField}
         <label>
-          Passwort für {server.user}@{server.host}
-          <input type="password" bind:value={password} required />
+          {#if needsCleanupPassword}
+            Passwort für {server.user}@{server.host}
+          {:else}
+            sudo-Passwort <span class="muted">(optional)</span>
+          {/if}
+          <input
+            type="password"
+            bind:value={password}
+            required={passwordRequired}
+            autocomplete="current-password"
+          />
           <span class="hint">
-            {#if needsSudoPassword && needsCleanupPassword}
+            {#if needsCleanupPassword && showsOptionalSudoField}
               Für den Cleanup-Login und — falls nötig — als sudo-Passwort beim Revert.
-            {:else if needsSudoPassword}
-              Wird als sudo-Passwort beim Revert genutzt (falls der User kein passwortloses sudo hat).
-            {:else}
+            {:else if needsCleanupPassword}
               Nur einmal für den Cleanup-Connect.
+            {:else}
+              Nur eingeben, falls der Remote-User <code>sudo</code> mit Passwort braucht.
+              Bei passwordless sudo leer lassen — wird bei Bedarf erneut abgefragt.
             {/if}
             Wird nicht gespeichert.
           </span>

@@ -91,6 +91,10 @@
   });
 </script>
 
+<svelte:window
+  onkeydown={(e) => e.key === "Escape" && showGenerate && !generating && (showGenerate = false)}
+/>
+
 <div class="keys-view">
   <aside class="list">
     <header>
@@ -232,8 +236,8 @@
 {/if}
 
 {#if showGenerate}
-  <div class="overlay" onclick={() => (showGenerate = false)}>
-    <form class="dialog" onclick={(e) => e.stopPropagation()} onsubmit={generate}>
+  <div class="overlay">
+    <form class="dialog" onsubmit={generate}>
       <h3>Neuen Key generieren</h3>
       <label>
         Name
