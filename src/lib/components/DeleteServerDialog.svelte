@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
+  import { toast } from "$lib/stores/toast.svelte";
   import type { Server } from "$lib/types";
 
   let { server, onClose }: { server: Server; onClose: () => void } = $props();
@@ -9,9 +10,12 @@
     serverRemoved: boolean;
     remoteUnhardenError: string | null;
     remoteCleanupError: string | null;
+    localKeyError: string | null;
+    keyStillReferenced: boolean;
   }
 
   let cleanupRemote = $state(true);
+  let deleteUnusedLocalKey = $state(false);
   let password = $state("");
   let sudoPassword = $state("");
   let submitting = $state(false);
@@ -26,10 +30,12 @@
     submitting = true;
     try {
       const cleanUpOnServer = !localOnly && hasKeyAuth && cleanupRemote;
+      const removeUnusedKey = !localOnly && hasKeyAuth && !cleanupRemote && deleteUnusedLocalKey;
       const report = await invoke<DeleteReport>("delete_server_full", {
         opts: {
           id: server.id,
           cleanupRemote: cleanUpOnServer,
+          deleteUnusedLocalKey: removeUnusedKey,
           password: cleanUpOnServer ? password : null,
           sudoPassword: cleanUpOnServer && showSudo && sudoPassword ? sudoPassword : null,
           force: localOnly,
@@ -43,6 +49,11 @@
       app.servers = app.servers.filter((s) => s.id !== server.id);
       if (app.selectedServerId === server.id) app.selectedServerId = null;
       await app.refresh();
+      if (report.localKeyError) {
+        toast.error(`SSH-Key konnte nicht vollständig gelöscht werden: ${report.localKeyError}`);
+      } else if (removeUnusedKey && report.keyStillReferenced) {
+        toast.info("Der SSH-Key bleibt erhalten, da ihn ein anderer Servereintrag verwendet.");
+      }
       onClose();
     } catch (e) {
       error = String(e);
@@ -86,7 +97,10 @@
           </label>
         {/if}
       {:else}
-        <p class="body">Beim lokalen Löschen bleiben die SSH-Schlüssel erhalten.</p>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={deleteUnusedLocalKey} disabled={submitting} />
+          Zugehörigen privaten SSH-Key lokal löschen, falls ihn kein anderer Servereintrag verwendet
+        </label>
       {/if}
     {/if}
 
