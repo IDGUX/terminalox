@@ -1,9 +1,8 @@
 name: Release
 
+# terminalox is published as source code only. This workflow never runs on its
+# own; it can only be started by hand and creates a draft release.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
