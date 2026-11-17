@@ -1,11 +1,17 @@
+#[macro_use]
+mod msg;
+mod access;
 mod commands;
 mod error;
+mod fsutil;
 mod keygen;
 mod models;
+mod secrets;
 mod ssh;
 mod ssh_config;
 mod state;
 mod storage;
+mod validate;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -25,6 +31,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
@@ -59,6 +66,12 @@ pub fn run() {
             commands::harden::verify_server_hardening,
             commands::hostkeys::trust_host_key,
             commands::config::sync_ssh_config,
+            commands::config::preview_ssh_config_import,
+            commands::config::import_ssh_config_hosts,
+            commands::secrets::provide_secret,
+            commands::secrets::forget_secret,
+            commands::secrets::secret_status,
+            commands::rotate::rotate_key,
             commands::backup::export_backup,
             commands::backup::inspect_backup,
             commands::backup::import_backup,

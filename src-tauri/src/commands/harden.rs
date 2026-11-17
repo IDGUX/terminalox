@@ -3,10 +3,31 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::access::Login;
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
+use crate::msg::Msg;
 use crate::ssh::harden::{self, HardenReadiness, VerifyOutcome};
 use crate::state::AppState;
+
+fn password_auth_hint() -> Msg {
+    msg!(
+        "harden_password_auth",
+        "The server still uses password auth, please deploy a key first."
+    )
+}
+
+/// Key/agent login for a server; `None` if it still uses password auth.
+async fn key_login(state: &State<'_, AppState>, server_id: Uuid) -> AppResult<Option<Login>> {
+    let store = state.store.read().await;
+    let server = store
+        .find_server(server_id)
+        .ok_or(AppError::UnknownServer)?;
+    if matches!(server.auth, AuthMode::Password) {
+        return Ok(None);
+    }
+    Ok(Some(Login::new(&store, &state.secrets, server, None)?))
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -17,7 +38,7 @@ pub struct HardenReport {
     pub sshd_reloaded: bool,
     pub password_auth_confirmed_disabled: bool,
     pub hardened: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Msg>,
 }
 
 #[tauri::command]
@@ -25,36 +46,22 @@ pub async fn check_harden_readiness(
     server_id: Uuid,
     state: State<'_, AppState>,
 ) -> AppResult<HardenReadiness> {
-    let (host, port, user, key_path) = {
-        let store = state.store.read().await;
-        let server = store
-            .find_server(server_id)
-            .ok_or(AppError::UnknownServer)?;
-        let key_id = match &server.auth {
-            AuthMode::Key { key_id } => *key_id,
-            AuthMode::Password => {
-                return Ok(HardenReadiness::Unavailable {
-                    reason:
-                        "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen."
-                            .into(),
-                });
-            }
-        };
-        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.private_path.clone(),
-        )
+    let Some(login) = key_login(&state, server_id).await? else {
+        return Ok(HardenReadiness::Unavailable {
+            reason: password_auth_hint(),
+        });
     };
 
-    let session = match harden::open_key_session(&host, port, &user, &key_path).await {
+    let session = match login.connect().await {
         Ok(s) => s,
-        Err(e @ AppError::HostKey(_)) => return Err(e),
+        Err(e @ (AppError::HostKey(_) | AppError::SecretRequired(_))) => return Err(e),
         Err(e) => {
             return Ok(HardenReadiness::Unavailable {
-                reason: format!("Key-Auth funktioniert nicht: {e}"),
+                reason: msg!(
+                    "harden_key_auth_failed",
+                    "Key login does not work: {detail}",
+                    detail = e.to_msg().text
+                ),
             });
         }
     };
@@ -67,59 +74,38 @@ pub async fn harden_server(
     sudo_password: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<HardenReport> {
-    let (host, port, user, key_path) = {
-        let store = state.store.read().await;
-        let server = store
-            .find_server(server_id)
-            .ok_or(AppError::UnknownServer)?;
-        let key_id = match &server.auth {
-            AuthMode::Key { key_id } => *key_id,
-            AuthMode::Password => {
-                return Err(AppError::Other(
-                    "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen.".into(),
-                ));
-            }
-        };
-        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.private_path.clone(),
-        )
-    };
+    let login = key_login(&state, server_id)
+        .await?
+        .ok_or_else(|| AppError::from(password_auth_hint()))?;
 
     let mut report = HardenReport::default();
 
     // Step 1: prove that the key actually grants access.
-    let session = match harden::open_key_session(&host, port, &user, &key_path).await {
+    let session = match login.connect().await {
         Ok(s) => {
             report.key_auth_verified = true;
             s
         }
-        Err(e @ AppError::HostKey(_)) => return Err(e),
+        Err(e @ (AppError::HostKey(_) | AppError::SecretRequired(_))) => return Err(e),
         Err(e) => {
-            report.warnings.push(format!(
-                "Key-Auth-Check fehlgeschlagen: {e}. Härten wurde nicht versucht."
+            report.warnings.push(msg!(
+                "harden_precheck_failed",
+                "Key login check failed, hardening was not attempted."
             ));
+            report.warnings.push(e.to_msg());
             return Ok(report);
         }
     };
 
     // Step 2: run the harden flow (drop-in + validate + reload + verify, with rollback).
-    let outcome = harden::harden(session, (&host, port, &user, &key_path), sudo_password.as_deref()).await?;
+    let outcome = harden::harden(session, &login, sudo_password.as_deref()).await?;
     report.dropin_installed = outcome.dropin_installed;
     report.sshd_validated = outcome.sshd_validated;
     report.sshd_reloaded = outcome.sshd_reloaded;
     report.password_auth_confirmed_disabled = outcome.password_auth_confirmed_disabled;
     report.hardened = outcome.all_ok();
     if !outcome.all_ok() {
-        let msg = if outcome.stderr.trim().is_empty() {
-            "Härten fehlgeschlagen (kein Detail vom Server)".to_string()
-        } else {
-            format!("Härten fehlgeschlagen: {}", outcome.stderr.trim())
-        };
-        report.warnings.push(msg);
+        report.warnings.push(outcome.failure_msg());
     }
 
     // Step 3: persist hardened flag.
@@ -144,7 +130,7 @@ pub struct VerifyHardenReport {
     /// `Some(false)` = at least one password method is enabled.
     /// `null` = couldn't determine (no sudo path).
     pub effective_password_auth_off: Option<bool>,
-    pub effective_check_error: Option<String>,
+    pub effective_check_error: Option<Msg>,
     /// Final verdict the app uses.
     pub is_hardened: bool,
     /// `true` if we updated the persisted server flag as a result.
@@ -158,30 +144,15 @@ pub async fn verify_server_hardening(
     sudo_password: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<VerifyHardenReport> {
-    let (host, port, user, key_path, was_hardened) = {
-        let store = state.store.read().await;
-        let server = store
-            .find_server(server_id)
-            .ok_or(AppError::UnknownServer)?;
-        let key_id = match &server.auth {
-            AuthMode::Key { key_id } => *key_id,
-            AuthMode::Password => {
-                return Err(AppError::Other(
-                    "Verify nur für Key-Auth-Server verfügbar.".into(),
-                ));
-            }
-        };
-        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.private_path.clone(),
-            server.hardened,
-        )
-    };
+    let login = key_login(&state, server_id).await?.ok_or_else(|| {
+        AppError::from(msg!(
+            "verify_key_only",
+            "Verification is only available for servers with key or agent login."
+        ))
+    })?;
+    let was_hardened = login.server.hardened;
 
-    let session = harden::open_key_session(&host, port, &user, &key_path).await?;
+    let session = login.connect().await?;
     let outcome: VerifyOutcome = harden::verify(session, sudo_password.as_deref()).await?;
 
     let is_hardened = outcome.is_hardened();

@@ -3,8 +3,11 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::access::{self, Login};
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
+use crate::msg::Msg;
+use crate::ssh::client::Credential;
 use crate::ssh::harden::{HardenReadiness, PrivilegeMethod};
 use crate::ssh::{deploy, harden};
 use crate::state::AppState;
@@ -20,7 +23,7 @@ pub struct DeployReport {
     pub password_auth_confirmed_disabled: bool,
     pub hardened: bool,
     pub server_auth_switched: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Msg>,
 }
 
 #[tauri::command]
@@ -35,45 +38,57 @@ pub async fn deploy_key(
     assign_to_server: bool,
     state: State<'_, AppState>,
 ) -> AppResult<DeployReport> {
-    let (host, port, user, public_openssh, key_path) = {
+    let (password_login, key_login, public_openssh) = {
         let store = state.store.read().await;
         let server = store
             .find_server(server_id)
             .ok_or(AppError::UnknownServer)?;
         let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.public_openssh.clone(),
-            key.private_path.clone(),
-        )
+        let target = access::target_for(&store, &state.secrets, server)?;
+        let password_login = Login {
+            server: server.clone(),
+            target,
+            cred: Credential::Password(password.clone()),
+        };
+        let key_login =
+            password_login.with_cred(Credential::Key(access::key_cred(&state.secrets, key)?));
+        (password_login, key_login, key.public_openssh.clone())
     };
 
     let mut report = DeployReport::default();
 
     // Step 1: Deploy key via password auth (appends to authorized_keys).
-    deploy::deploy_public_key(&host, port, &user, &password, &public_openssh).await?;
+    // The password typed into the deploy dialog is reported there, not
+    // re-prompted globally (jump-host passwords still are).
+    deploy::deploy_public_key(&password_login, &public_openssh)
+        .await
+        .map_err(|e| match e {
+            AppError::SecretRequired(r) if r.id == server_id => AppError::AuthFailed,
+            other => other,
+        })?;
     report.key_deployed = true;
 
     // Step 2: Pre-flight — fresh session using only the key proves it grants access.
-    let key_session = match harden::open_key_session(&host, port, &user, &key_path).await {
+    let key_session = match key_login.connect().await {
         Ok(s) => {
             report.key_auth_verified = true;
             s
         }
         Err(e) => {
-            report.warnings.push(format!(
-                "Key-Pre-Flight fehlgeschlagen: {e}. Passwort-Login bleibt aktiv."
+            report.warnings.push(msg!(
+                "deploy_preflight_failed",
+                "Key pre-flight failed, password login stays enabled."
             ));
+            report.warnings.push(e.to_msg());
             return Ok(report);
         }
     };
 
     if !assign_to_server {
-        report.warnings.push(
-            "Key ist deployed. Für die Härtung muss der geprüfte SSH-Key dem Server in terminalox zugewiesen werden.".into(),
-        );
+        report.warnings.push(msg!(
+            "deploy_not_assigned",
+            "Key is deployed. For hardening, the verified SSH key must be assigned to the server in terminalox."
+        ));
         return Ok(report);
     }
 
@@ -85,33 +100,29 @@ pub async fn deploy_key(
     match readiness {
         HardenReadiness::Ready { method } => {
             // Re-open session — probe_readiness consumed the first one.
-            let harden_session =
-                harden::open_key_session(&host, port, &user, &key_path).await?;
+            let harden_session = key_login.connect().await?;
             let sudo_pw: Option<&str> = match method {
                 PrivilegeMethod::Root | PrivilegeMethod::SudoNopasswd => None,
                 PrivilegeMethod::SudoWithPassword => {
                     Some(sudo_password.as_deref().unwrap_or(password.as_str()))
                 }
             };
-            let outcome = harden::harden(harden_session, (&host, port, &user, &key_path), sudo_pw).await?;
+            let outcome = harden::harden(harden_session, &key_login, sudo_pw).await?;
             report.dropin_installed = outcome.dropin_installed;
             report.sshd_validated = outcome.sshd_validated;
             report.sshd_reloaded = outcome.sshd_reloaded;
             report.password_auth_confirmed_disabled = outcome.password_auth_confirmed_disabled;
             report.hardened = outcome.all_ok();
             if !outcome.all_ok() {
-                let msg = if outcome.stderr.is_empty() {
-                    "Härten fehlgeschlagen (kein Detail vom Server)".to_string()
-                } else {
-                    format!("Härten fehlgeschlagen: {}", outcome.stderr.trim())
-                };
-                report.warnings.push(msg);
+                report.warnings.push(outcome.failure_msg());
             }
         }
         HardenReadiness::Unavailable { reason } => {
-            report.warnings.push(format!(
-                "Key ist deployed, aber Härten wurde übersprungen: {reason}"
+            report.warnings.push(msg!(
+                "deploy_harden_skipped",
+                "Key is deployed, but hardening was skipped:"
             ));
+            report.warnings.push(reason);
         }
     }
 

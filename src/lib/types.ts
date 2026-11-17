@@ -1,8 +1,12 @@
+import type { Msg } from "./i18n/index.svelte";
+
 export type Uuid = string;
+export type { Msg };
 
 export type AuthMode =
   | { mode: "password" }
-  | { mode: "key"; key_id: Uuid };
+  | { mode: "key"; key_id: Uuid }
+  | { mode: "agent" };
 
 export interface Server {
   id: Uuid;
@@ -17,6 +21,8 @@ export interface Server {
   hardened: boolean;
   hardened_at?: string | null;
   folder_id?: Uuid | null;
+  /** Bastion host the connection is tunnelled through (ProxyJump). */
+  jump_server_id?: Uuid | null;
 }
 
 export interface Folder {
@@ -34,7 +40,7 @@ export interface DeployReport {
   passwordAuthConfirmedDisabled: boolean;
   hardened: boolean;
   serverAuthSwitched: boolean;
-  warnings: string[];
+  warnings: Msg[];
 }
 
 export interface HardenReport {
@@ -44,7 +50,7 @@ export interface HardenReport {
   sshdReloaded: boolean;
   passwordAuthConfirmedDisabled: boolean;
   hardened: boolean;
-  warnings: string[];
+  warnings: Msg[];
 }
 
 export interface VerifyHardenReport {
@@ -54,7 +60,7 @@ export interface VerifyHardenReport {
    *  false = effektive Konfig erlaubt Passwort-Login (Drift!).
    *  null = effektiver Check konnte nicht laufen (kein sudo). */
   effectivePasswordAuthOff: boolean | null;
-  effectiveCheckError: string | null;
+  effectiveCheckError: Msg | null;
   isHardened: boolean;
   stateChanged: boolean;
   previousState: boolean;
@@ -64,7 +70,7 @@ export type PrivilegeMethod = "root" | "sudo_nopasswd" | "sudo_with_password";
 
 export type HardenReadiness =
   | { status: "ready"; method: PrivilegeMethod }
-  | { status: "unavailable"; reason: string };
+  | { status: "unavailable"; reason: Msg };
 
 export interface NewServerInput {
   name: string;
@@ -74,6 +80,7 @@ export interface NewServerInput {
   color?: string | null;
   auth: AuthMode;
   folder_id?: Uuid | null;
+  jump_server_id?: Uuid | null;
 }
 
 export interface KeyInfo {
@@ -86,6 +93,8 @@ export interface KeyInfo {
   created_at: string;
   fingerprint?: string | null;
   origin_imported: boolean;
+  /** Private key file is passphrase-protected. */
+  encrypted?: boolean;
 }
 
 export interface HostKeyRejection {
@@ -103,13 +112,44 @@ export interface KeyUsage {
   servers: Server[];
 }
 
-export interface SessionDataEvent {
-  sessionId: Uuid;
-  dataB64: string;
+/** Backend needs a password or key passphrase; see `provide_secret`. */
+export interface SecretRequest {
+  kind: "password" | "passphrase";
+  id: Uuid;
+  label: string;
+  /** A previous value was tried and rejected. */
+  wrong: boolean;
+}
+
+export interface RotateReport {
+  newKey: KeyInfo;
+  oldKeyRevoked: boolean;
+  oldKeyRemovedLocally: boolean;
+  oldKeyStillUsedBy: string[];
+  warnings: Msg[];
+}
+
+export interface ImportCandidate {
+  alias: string;
+  host: string;
+  user?: string | null;
+  port: number;
+  identityFile?: string | null;
+  proxyJump?: string | null;
+  effectiveUser: string;
+  alreadyExists: boolean;
+  problem?: Msg | null;
+  auth: "key" | "agent" | "password";
+}
+
+export interface ConfigImportReport {
+  serversAdded: number;
+  keysImported: number;
+  warnings: { alias: string; msg: Msg }[];
 }
 
 export interface SessionClosedEvent {
   sessionId: Uuid;
   exitCode?: number | null;
-  error?: string | null;
+  error?: Msg | null;
 }

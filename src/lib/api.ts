@@ -1,16 +1,23 @@
-import { invoke as rawInvoke } from "@tauri-apps/api/core";
+import { Channel, invoke as rawInvoke } from "@tauri-apps/api/core";
 import { hostKeyPrompt } from "./stores/hostkey.svelte";
+import { secretPrompt } from "./stores/secret.svelte";
+import { errorText, t } from "./i18n/index.svelte";
 import type {
   AuthMode,
+  ConfigImportReport,
   DeployReport,
   Folder,
   HardenReadiness,
   HardenReport,
   HostKeyRejection,
+  ImportCandidate,
   KeyInfo,
   KeyUsage,
   NewServerInput,
+  RotateReport,
+  SecretRequest,
   Server,
+  SessionClosedEvent,
   Uuid,
   VerifyHardenReport,
 } from "./types";
@@ -22,19 +29,41 @@ function hostKeyError(e: unknown): HostKeyRejection | null {
   return null;
 }
 
-/** Wie `invoke`, aber bei unbekanntem/geändertem Host-Key wird der Nutzer gefragt
- *  und der Aufruf nach Bestätigung wiederholt. Der Server lehnt vor jeder
- *  Authentifizierung ab, die Wiederholung ist also unkritisch. */
+function secretError(e: unknown): SecretRequest | null {
+  if (e && typeof e === "object" && "secretRequired" in e) {
+    return (e as { secretRequired: SecretRequest }).secretRequired;
+  }
+  return null;
+}
+
+export { errorText };
+
+/** Wie `invoke`, aber fehlende Zustimmung oder Secrets werden beim Nutzer erfragt
+ *  und der Aufruf danach wiederholt:
+ *  - unbekannter/geänderter Host-Key → Fingerprint bestätigen (der Server lehnt
+ *    vor jeder Authentifizierung ab, die Wiederholung ist also unkritisch),
+ *  - fehlendes/falsches Passwort oder Key-Passphrase → Eingabe-Dialog. */
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await rawInvoke<T>(cmd, args);
   } catch (e) {
     const hk = hostKeyError(e);
-    if (!hk) throw e;
-    if (!(await hostKeyPrompt.ask(hk))) {
-      throw `Verbindung zu ${hk.host} abgebrochen: Host-Key nicht bestätigt.`;
+    if (hk) {
+      if (!(await hostKeyPrompt.ask(hk))) {
+        throw t("api.hostKeyAborted", { host: hk.host });
+      }
+      return invoke<T>(cmd, args);
     }
-    return invoke<T>(cmd, args);
+    const sr = secretError(e);
+    if (sr) {
+      if (!(await secretPrompt.ask(sr))) {
+        throw sr.kind === "passphrase"
+          ? t("api.passphraseCancelled", { label: sr.label })
+          : t("api.passwordCancelled", { label: sr.label });
+      }
+      return invoke<T>(cmd, args);
+    }
+    throw errorText(e);
   }
 }
 
@@ -43,7 +72,13 @@ export const api = {
   addServer: (input: NewServerInput) =>
     invoke<Server>("add_server", { input }),
   deleteServer: (id: Uuid) => invoke<void>("delete_server", { id }),
-  updateServer: (input: { id: Uuid } & Partial<Pick<Server, "name" | "host" | "port" | "user">> & { color?: string | null; auth?: AuthMode }) =>
+  updateServer: (
+    input: { id: Uuid } & Partial<Pick<Server, "name" | "host" | "port" | "user">> & {
+      color?: string | null;
+      auth?: AuthMode;
+      jump_server_id?: Uuid | null;
+    },
+  ) =>
     invoke<Server>("update_server", { input }),
 
   listFolders: () => invoke<Folder[]>("list_folders"),
@@ -55,15 +90,35 @@ export const api = {
     invoke<Server>("move_server", { serverId, folderId }),
 
   listKeys: () => invoke<KeyInfo[]>("list_keys"),
-  generateKey: (name: string) => invoke<KeyInfo>("generate_key", { name }),
+  generateKey: (name: string, passphrase: string | null = null, rememberPassphrase = false) =>
+    invoke<KeyInfo>("generate_key", { name, passphrase, rememberPassphrase }),
   importKey: (sourcePath: string, name: string) =>
     invoke<KeyInfo>("import_key", { sourcePath, name }),
   serversUsingKey: (keyId: Uuid) =>
     invoke<KeyUsage>("servers_using_key", { keyId }),
   deleteKey: (id: Uuid) => invoke<void>("delete_key", { id }),
 
-  openSession: (serverId: Uuid, password: string | null, cols: number, rows: number) =>
-    invoke<Uuid>("open_session", { serverId, password, cols, rows }),
+  /** Output arrives as raw bytes on `onData`; `onClosed` fires once at the end. */
+  openSession: (
+    serverId: Uuid,
+    cols: number,
+    rows: number,
+    onData: (bytes: Uint8Array) => void,
+    onClosed: (ev: SessionClosedEvent) => void,
+  ) => {
+    const data = new Channel<ArrayBuffer>();
+    data.onmessage = (buf) => onData(new Uint8Array(buf));
+    const closed = new Channel<SessionClosedEvent>();
+    closed.onmessage = onClosed;
+    return invoke<Uuid>("open_session", {
+      serverId,
+      password: null,
+      cols,
+      rows,
+      onData: data,
+      onClosed: closed,
+    });
+  },
   writeSession: (sessionId: Uuid, dataB64: string) =>
     invoke<void>("write_session", { sessionId, dataB64 }),
   resizeSession: (sessionId: Uuid, cols: number, rows: number) =>
@@ -99,4 +154,14 @@ export const api = {
     }),
 
   syncSshConfig: () => invoke<string>("sync_ssh_config"),
+  previewSshConfigImport: () => invoke<ImportCandidate[]>("preview_ssh_config_import"),
+  importSshConfigHosts: (aliases: string[]) =>
+    invoke<ConfigImportReport>("import_ssh_config_hosts", { aliases }),
+
+  rotateKey: (serverId: Uuid) => invoke<RotateReport>("rotate_key", { serverId }),
+
+  secretStatus: (kind: SecretRequest["kind"], id: Uuid) =>
+    invoke<{ remembered: boolean }>("secret_status", { kind, id }),
+  forgetSecret: (kind: SecretRequest["kind"], id: Uuid) =>
+    invoke<void>("forget_secret", { kind, id }),
 };

@@ -11,7 +11,30 @@
 
 A small cross-platform SSH terminal with **one-click server hardening**.
 
-The use case this was built for: you SSH into a lot of boxes every day, but setting up SSH keys per server is enough friction that you end up typing passwords. terminalox fixes that — add a server once, click **Deployen + Härten**, and the app:
+![terminalox: server list with folders and an open SSH session](docs/screenshots/terminal.png)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/harden.png" alt="One-click hardening with automatic rollback" /></td>
+    <td><img src="docs/screenshots/keys.png" alt="Key management with fingerprint and usage" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>One-click hardening, guarded by an automatic rollback</sub></td>
+    <td align="center"><sub>Key management: fingerprint, public key, which servers use it</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/import.png" alt="Import hosts from ~/.ssh/config" /></td>
+    <td><img src="docs/screenshots/terminal-de.png" alt="German UI" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Import existing hosts from <code>~/.ssh/config</code></sub></td>
+    <td align="center"><sub>English and German UI</sub></td>
+  </tr>
+</table>
+
+<sub>Screenshots use made-up demo data. To reproduce them: <code>pnpm dev</code> and open <code>http://localhost:1420/?demo</code> (see <code>src/lib/demo.ts</code>).</sub>
+
+The use case this was built for: you SSH into a lot of boxes every day, but setting up SSH keys per server is enough friction that you end up typing passwords. terminalox fixes that — add a server once, click **Deploy + harden**, and the app:
 
 1. generates an Ed25519 keypair,
 2. pushes the public key into `~/.ssh/authorized_keys` on the server,
@@ -24,26 +47,31 @@ Hardening needs root or `sudo`, `bash` and `flock` on the server, and a running 
 
 ## Remove a server entry
 
-- **Server already decommissioned** — Uncheck **SSH-Key auch vom Server entfernen** in the delete dialog. To also remove the associated key files from your computer, select **Zugehörigen privaten SSH-Key lokal löschen**. This works without an SSH connection. If another server entry uses the key, terminalox keeps it.
-- **Server still reachable** — Keep **SSH-Key auch vom Server entfernen** selected to remove the public key from the server. terminalox makes sure you keep a way in:
+- **Server already decommissioned** — Uncheck **Also remove the SSH key from the server** in the delete dialog. To also remove the associated key files from your computer, select **Delete the associated private SSH key locally**. This works without an SSH connection. If another server entry uses the key, terminalox keeps it.
+- **Server still reachable** — Keep **Also remove the SSH key from the server** selected to remove the public key from the server. terminalox makes sure you keep a way in:
   - **With a password:** If the entry is marked as hardened, terminalox first undoes its SSH configuration changes. It then requires a successful password login over a fresh SSH connection before removing the public key. If that login fails, terminalox re-applies the hardening and keeps the key.
-  - **Without a password** (key-only accounts, typical for cloud servers): Leave the password empty and confirm **Kein Passwort – ich habe einen anderen SSH-Key für diesen Account**. terminalox removes the key over the key itself and refuses if no other key would remain in `authorized_keys`. The hardening stays in place.
+  - **Without a password** (key-only accounts, typical for cloud servers): Leave the password empty and confirm **No password: I have another SSH key for this account**. terminalox removes the key over the key itself and refuses if no other key would remain in `authorized_keys`. The hardening stays in place.
 
-  If remote cleanup fails, you can retry or choose **Nur lokal löschen** to remove the entry and keep the local key.
+  If remote cleanup fails, you can retry or choose **Delete locally only** to remove the entry and keep the local key.
 
 You can remove unused keys from previously deleted server entries in the key management view.
 
 ## Features
 
-- Interactive SSH terminal with tabs and split panes (xterm.js, full PTY).
+- English (US) and German UI, following the system language (switch with EN | DE in the tab bar).
+- Interactive SSH terminal with tabs and split panes (xterm.js, full PTY, binary IPC channel).
 - SSH host-key verification using `~/.ssh/known_hosts`, with a fingerprint prompt for new keys.
-- Ed25519 key generation + import of existing keys.
+- Ed25519 key generation (optionally passphrase-protected) + import of existing keys, including encrypted ones.
+- Login via password, terminalox key or the running **ssh-agent** (OpenSSH agent, 1Password, Pageant …).
+- **Jump hosts** (like `ProxyJump`): any server entry can tunnel through another one, also for deploy, hardening and cleanup.
+- Passwords and key passphrases are asked once and can optionally be stored in the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service).
 - **One-click SSH hardening** and optional removal of the managed configuration during server cleanup.
+- **Key rotation**: new key is added and verified before the old one is revoked, so access is never lost.
 - Key management page with fingerprint, copy-public-to-clipboard, reverse-lookup ("which servers use this key").
-- Managed block in `~/.ssh/config` so the system `ssh` command works alongside the app.
-- Encrypted backup/restore (AES-256-GCM + Argon2id) for moving state between machines.
+- Managed block in `~/.ssh/config` so the system `ssh` command works alongside the app (unique aliases, `ProxyJump`); existing hosts can be **imported from `~/.ssh/config`**.
+- Encrypted backup/restore (AES-256-GCM + Argon2id) for moving state between machines. Imported entries are validated like manual input.
 - Pure Rust SSH stack (russh) — no OpenSSL dependency.
-- Minimal Tauri 2 capabilities: only `core`, `clipboard-manager:write-text`, `dialog:open/save`.
+- Minimal Tauri 2 capabilities: only `core`, `clipboard-manager:write-text`, `dialog:open/save` and `opener:open-url` restricted to `http(s)` links; strict Content Security Policy.
 
 ## Download
 
@@ -70,7 +98,7 @@ These builds are **not code-signed** yet (that costs money and an Apple/Microsof
 - Platform-specific:
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
   - **Windows:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) + [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (bundled with Windows 11)
-  - **Linux:** `libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential`
+  - **Linux:** `libwebkit2gtk-4.1-dev libdbus-1-dev pkg-config libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential`
 
 ### Steps
 
