@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::keygen;
 use crate::models::{AuthMode, KeyInfo, Server};
+use crate::secrets::SecretKind;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -16,8 +17,24 @@ pub async fn list_keys(state: State<'_, AppState>) -> AppResult<Vec<KeyInfo>> {
 }
 
 #[tauri::command]
-pub async fn generate_key(name: String, state: State<'_, AppState>) -> AppResult<KeyInfo> {
-    let info = keygen::generate_ed25519(&name)?;
+pub async fn generate_key(
+    name: String,
+    passphrase: Option<String>,
+    remember_passphrase: Option<bool>,
+    state: State<'_, AppState>,
+) -> AppResult<KeyInfo> {
+    let passphrase = passphrase.filter(|p| !p.is_empty());
+    let info = keygen::generate_ed25519(&name, passphrase.as_deref())?;
+    if let Some(p) = &passphrase {
+        if let Err(e) = state.secrets.set(
+            SecretKind::KeyPassphrase,
+            info.id,
+            p,
+            remember_passphrase.unwrap_or(false),
+        ) {
+            tracing::warn!("storing passphrase failed: {e}");
+        }
+    }
     let mut store = state.store.write().await;
     store.keys.push(info.clone());
     store.save(&state.store_file())?;
@@ -41,8 +58,8 @@ pub async fn import_key(
         {
             // Clean up the file we just wrote before returning.
             let _ = keygen::delete_key_files(&info);
-            return Err(AppError::Other(
-                "dieser Key (Fingerprint) ist bereits importiert".into(),
+            return Err(AppError::Invalid(
+                "Dieser Key (Fingerprint) ist bereits importiert".into(),
             ));
         }
     }
@@ -59,10 +76,7 @@ pub struct KeyUsage {
 }
 
 #[tauri::command]
-pub async fn servers_using_key(
-    key_id: Uuid,
-    state: State<'_, AppState>,
-) -> AppResult<KeyUsage> {
+pub async fn servers_using_key(key_id: Uuid, state: State<'_, AppState>) -> AppResult<KeyUsage> {
     let store = state.store.read().await;
     let servers: Vec<Server> = store
         .servers
@@ -98,6 +112,7 @@ pub async fn delete_key(id: Uuid, state: State<'_, AppState>) -> AppResult<()> {
         .ok_or(AppError::UnknownKey)?;
     let info = store.keys.remove(idx);
     keygen::delete_key_files(&info)?;
+    state.secrets.forget(SecretKind::KeyPassphrase, info.id);
     store.save(&state.store_file())?;
     Ok(())
 }

@@ -5,16 +5,18 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
-use rand::Rng;
 use rand::rngs::SysRng;
+use rand::Rng;
 use rand_core::UnwrapErr;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::fsutil;
 use crate::keygen;
-use crate::models::{Folder, KeyInfo, Server};
+use crate::models::{AuthMode, Folder, KeyInfo, Server};
 use crate::state::AppState;
+use crate::validate;
 
 pub const EXPORT_VERSION: u32 = 1;
 pub const MAGIC: &str = "terminalox-backup";
@@ -173,7 +175,8 @@ pub async fn export_backup(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, json)?;
+    // The backup contains private keys: owner-only, even when encrypted.
+    fsutil::write_atomic_private(&path, &json)?;
 
     let (n_servers, n_keys) = (store.servers.len(), store.keys.len());
     Ok(ExportReport {
@@ -272,16 +275,17 @@ pub async fn import_backup(
         keys_updated: 0,
         keys_skipped: 0,
         key_file_conflicts: vec![],
+        servers_invalid: vec![],
     };
 
     let mut store = state.store.write().await;
 
     // ---- Keys first: write files, update KeyInfo paths to match this platform. ----
     for bundle in payload.keys {
-        let existing = store
-            .keys
-            .iter()
-            .position(|k| k.id == bundle.info.id || k.fingerprint == bundle.info.fingerprint);
+        let existing = store.keys.iter().position(|k| {
+            k.id == bundle.info.id
+                || (k.fingerprint.is_some() && k.fingerprint == bundle.info.fingerprint)
+        });
         if existing.is_some() && !opts.replace_existing {
             report.keys_skipped += 1;
             continue;
@@ -299,9 +303,11 @@ pub async fn import_backup(
         // If file paths are in use, generate unique variant.
         let (final_private, final_public) = pick_non_colliding(&private_path, &public_path);
         if final_private != private_path {
-            report
-                .key_file_conflicts
-                .push(format!("{} → {}", private_path.display(), final_private.display()));
+            report.key_file_conflicts.push(format!(
+                "{} → {}",
+                private_path.display(),
+                final_private.display()
+            ));
         }
 
         let private_bytes = BASE64_STANDARD
@@ -311,8 +317,11 @@ pub async fn import_backup(
             .decode(&bundle.public_b64)
             .map_err(|e| AppError::Other(format!("b64 public: {e}")))?;
 
-        write_private(&final_private, &private_bytes)?;
-        std::fs::write(&final_public, &public_bytes)?;
+        fsutil::write_private_new(&final_private, &private_bytes)?;
+        if let Err(e) = fsutil::write_private_new(&final_public, &public_bytes) {
+            let _ = std::fs::remove_file(&final_private);
+            return Err(e);
+        }
 
         let mut info = bundle.info.clone();
         info.private_path = final_private.to_string_lossy().to_string();
@@ -337,7 +346,18 @@ pub async fn import_backup(
     }
 
     // ---- Servers. ----
-    for server in payload.servers {
+    for mut server in payload.servers {
+        // Backups may come from elsewhere: same rules as manual entry.
+        if let Err(e) = validate::server(&mut server) {
+            report.servers_invalid.push(format!("{}: {e}", server.name));
+            continue;
+        }
+        if validate::unique_name(&store, &server.name, Some(server.id)).is_err() {
+            report
+                .servers_invalid
+                .push(format!("{}: Name ist bereits vergeben", server.name));
+            continue;
+        }
         let existing = store.servers.iter().position(|s| s.id == server.id);
         if existing.is_some() && !opts.replace_existing {
             report.servers_skipped += 1;
@@ -353,6 +373,14 @@ pub async fn import_backup(
     }
 
     store.clear_dangling_folder_refs();
+    store.clear_dangling_jump_refs();
+    // A server whose key was skipped or missing in the backup falls back to password.
+    let key_ids: Vec<uuid::Uuid> = store.keys.iter().map(|k| k.id).collect();
+    for s in &mut store.servers {
+        if matches!(s.auth, AuthMode::Key { key_id } if !key_ids.contains(&key_id)) {
+            s.auth = AuthMode::Password;
+        }
+    }
     store.save(&state.store_file())?;
     Ok(report)
 }
@@ -381,7 +409,10 @@ fn pick_non_colliding(private_path: &Path, public_path: &Path) -> (PathBuf, Path
         return (private_path.to_path_buf(), public_path.to_path_buf());
     }
     let parent = private_path.parent().unwrap_or(Path::new("."));
-    let stem = private_path.file_name().unwrap_or_default().to_string_lossy();
+    let stem = private_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     for n in 1..1000 {
         let candidate_priv = parent.join(format!("{stem}_imp{n}"));
         let candidate_pub = parent.join(format!("{stem}_imp{n}.pub"));
@@ -390,18 +421,6 @@ fn pick_non_colliding(private_path: &Path, public_path: &Path) -> (PathBuf, Path
         }
     }
     (private_path.to_path_buf(), public_path.to_path_buf())
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> AppResult<()> {
-    std::fs::write(path, bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
-    }
-    Ok(())
 }
 
 // ---------- Reports ----------
@@ -439,5 +458,6 @@ pub struct ImportReport {
     pub keys_updated: usize,
     pub keys_skipped: usize,
     pub key_file_conflicts: Vec<String>,
+    /// Server entries rejected by validation (name: reason).
+    pub servers_invalid: Vec<String>,
 }
-

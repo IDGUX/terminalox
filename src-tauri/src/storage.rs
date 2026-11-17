@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::AppResult;
+use crate::fsutil;
 use crate::models::{Folder, KeyInfo, Server};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -32,11 +33,8 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        fsutil::write_atomic_private(path, &bytes)
     }
 
     pub fn find_server(&self, id: Uuid) -> Option<&Server> {
@@ -61,8 +59,25 @@ impl Store {
         }
     }
 
+    /// Server, deren Jump-Host gelöscht wurde, verbinden wieder direkt.
+    pub fn clear_dangling_jump_refs(&mut self) {
+        let ids: Vec<Uuid> = self.servers.iter().map(|s| s.id).collect();
+        for s in &mut self.servers {
+            if matches!(s.jump_server_id, Some(id) if !ids.contains(&id)) {
+                s.jump_server_id = None;
+            }
+        }
+    }
+
+    /// Servers that use `id` as jump host.
+    pub fn servers_jumping_via(&self, id: Uuid) -> Vec<&Server> {
+        self.servers
+            .iter()
+            .filter(|s| s.jump_server_id == Some(id))
+            .collect()
+    }
+
     pub fn find_key(&self, id: Uuid) -> Option<&KeyInfo> {
         self.keys.iter().find(|k| k.id == id)
     }
 }
-
