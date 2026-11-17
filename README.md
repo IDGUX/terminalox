@@ -4,12 +4,14 @@
 
 > **Disclaimer.** terminalox is an experimental open-source side project provided
 > **AS-IS** and is **not developed in the course of a commercial activity**. It is
-> **not intended for production use**. Installers published under Releases are
-> **unsigned**. Use entirely at your own risk; **no warranty**,
+> **not intended for production use**. It is published as **source code only**;
+> you build and run it yourself. Use entirely at your own risk; **no warranty**,
 > **no fitness-for-purpose claim**, and **no liability** is accepted to the extent
 > permitted by law. See [LICENSE](LICENSE) for the full MIT terms.
 
 A small cross-platform SSH terminal with **one-click server hardening**.
+
+**→ [Build it yourself](#build-it-yourself)** (macOS, Windows, Linux)
 
 ![terminalox: server list with folders and an open SSH session](docs/screenshots/terminal.png)
 
@@ -73,44 +75,108 @@ You can remove unused keys from previously deleted server entries in the key man
 - Pure Rust SSH stack (russh) — no OpenSSL dependency.
 - Minimal Tauri 2 capabilities: only `core`, `clipboard-manager:write-text`, `dialog:open/save` and `opener:open-url` restricted to `http(s)` links; strict Content Security Policy.
 
-## Download
+## Build it yourself
 
-The GitHub Actions release workflow builds installers for `v*` tags and supports manual runs. Grab the matching installer from the [Releases](https://github.com/IDGUX/terminalox/releases) page:
+terminalox is published as **source code only**. There are no prebuilt installers: you build the app on your own machine from the code in this repository. A first build takes about 5–15 minutes; later builds are much faster.
 
-- **macOS:** `terminalox_<version>_aarch64.dmg` (Apple Silicon) or `terminalox_<version>_x64.dmg` (Intel)
-- **Windows:** `terminalox_<version>_x64-setup.exe` (NSIS) or `.msi`
-- **Linux:** `terminalox_<version>_amd64.AppImage` / `.deb`
+A self-built app is not downloaded from the internet, so macOS Gatekeeper and Windows SmartScreen do not complain about a missing code signature.
 
-### First launch: unsigned app warnings
-
-These builds are **not code-signed** yet (that costs money and an Apple/Microsoft account).
-
-- **macOS:** double-click will say "can't be opened because Apple cannot check it for malicious software". Workaround: right-click the `.app` → **Open** → confirm. Or once: `xattr -cr /Applications/terminalox.app`.
-- **Windows:** SmartScreen shows "Windows protected your PC". Click **More info** → **Run anyway**.
-
-## Build from source
-
-### Prerequisites
-
-- Stable [Rust](https://rustup.rs)
-- A supported [Node.js](https://nodejs.org) LTS release
-- [pnpm](https://pnpm.io) 10 to match CI
-- Platform-specific:
-  - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
-  - **Windows:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) + [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (bundled with Windows 11)
-  - **Linux:** `libwebkit2gtk-4.1-dev libdbus-1-dev pkg-config libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential`
-
-### Steps
+### macOS
 
 ```bash
+# 1. Tools: Xcode Command Line Tools, Rust, Node.js, pnpm
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+brew install node            # or the LTS installer from https://nodejs.org
+npm install -g pnpm@10
+
+# 2. Build
 git clone https://github.com/IDGUX/terminalox.git
 cd terminalox
 pnpm install --frozen-lockfile
-pnpm tauri dev          # development, hot-reload
-pnpm tauri build        # release build → src-tauri/target/release/bundle/
+pnpm tauri build
+
+# 3. Install
+cp -R src-tauri/target/release/bundle/macos/terminalox.app /Applications/
 ```
 
-### Universal macOS binary (Apple Silicon + Intel)
+### Windows (PowerShell)
+
+Open **PowerShell** (no admin needed for most steps; the Build Tools installer asks for elevation itself):
+
+```powershell
+# 1. Tools: Git, Rust, Node.js, C++ Build Tools, WebView2
+winget install --id Git.Git -e
+winget install --id Rustlang.Rustup -e
+winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+winget install --id Microsoft.EdgeWebView2Runtime -e   # already included in Windows 11
+```
+
+**Close and reopen PowerShell** so the new tools are on `PATH`, then:
+
+```powershell
+# 2. Allow npm/pnpm scripts for your user (only needed once)
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+# 3. pnpm + build
+rustup default stable
+npm install -g pnpm@10
+git clone https://github.com/IDGUX/terminalox.git
+cd terminalox
+pnpm install --frozen-lockfile
+pnpm tauri build
+
+# 4. Install: run the generated setup
+Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | ForEach-Object { Start-Process $_.FullName }
+```
+
+The build also produces an `.msi` in `src-tauri\target\release\bundle\msi\`.
+
+### Linux (Debian / Ubuntu)
+
+```bash
+# 1. Tools: system libraries, Rust, Node.js 22, pnpm
+sudo apt update
+sudo apt install -y git curl build-essential pkg-config libssl-dev libdbus-1-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+sudo npm install -g pnpm@10
+
+# 2. Build
+git clone https://github.com/IDGUX/terminalox.git
+cd terminalox
+pnpm install --frozen-lockfile
+pnpm tauri build
+
+# 3. Install the .deb (or run the AppImage from bundle/appimage/)
+sudo apt install ./src-tauri/target/release/bundle/deb/*.deb
+```
+
+Other distributions need the equivalent packages; see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+### Update to a newer version
+
+```bash
+cd terminalox
+git pull
+pnpm install --frozen-lockfile
+pnpm tauri build
+```
+
+Then install the new build the same way as above. Your servers and keys are kept.
+
+### Development
+
+```bash
+pnpm tauri dev          # app with hot-reload
+```
+
+Universal macOS binary (Apple Silicon + Intel):
 
 ```bash
 rustup target add x86_64-apple-darwin
@@ -145,8 +211,9 @@ Run `pnpm check` for frontend diagnostics, `pnpm build` for the static frontend 
 
 ## Security notes
 
-- Passwords are **never persisted**. terminalox uses them for SSH login during deployment and cleanup, or for `sudo` when changing the server configuration.
-- Managed private keys are unencrypted files under `~/.ssh/terminalox_*`. On Unix, terminalox applies `0600` after writing the file. On Windows, the files inherit filesystem permissions. Passphrase-protected private-key import is currently unsupported.
+- **Try hardening on a test server first**, and keep a second SSH session open while you harden a server you depend on.
+- Passwords and key passphrases are kept in memory only, unless you tick **Remember** in the prompt; then they are stored in the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service), never in terminalox's own files. terminalox uses passwords for SSH login during deployment and cleanup, or for `sudo` when changing the server configuration.
+- Managed private keys are files under `~/.ssh/terminalox_*`, optionally protected with a passphrase. On Unix, terminalox creates them with mode `0600`. On Windows, the files inherit filesystem permissions.
 - terminalox checks `~/.ssh/known_hosts` before sending credentials. For a new key, compare the displayed SHA-256 fingerprint with a fingerprint obtained through a trusted channel before accepting it. A changed key of the same algorithm triggers a warning. Approving a replacement appends it to `known_hosts`; retire the old key separately once you have verified the rotation. An unreadable trust store can be treated as empty, and the parser does not honor OpenSSH `@revoked` markers.
 - Host verification uses public host keys. OpenSSH host certificates and certificate authority entries are currently unsupported.
 - SSH hardening installs `/etc/ssh/sshd_config.d/00-terminalox.conf` and may add a managed `Include` block to `/etc/ssh/sshd_config`. Uninstalling terminalox leaves the remote configuration in place.
@@ -157,8 +224,6 @@ Run `pnpm check` for frontend diagnostics, `pnpm build` for the static frontend 
 
 - SFTP panel.
 - Port-forwarding.
-- Code-signing for macOS/Windows releases.
-- Encrypted private keys (passphrase-protected).
 
 ## License
 
