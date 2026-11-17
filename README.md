@@ -11,6 +11,29 @@
 
 A small cross-platform SSH terminal with **one-click server hardening**.
 
+![terminalox: server list with folders and an open SSH session](docs/screenshots/terminal.png)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/harden.png" alt="One-click hardening with automatic rollback" /></td>
+    <td><img src="docs/screenshots/keys.png" alt="Key management with fingerprint and usage" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>One-click hardening, guarded by an automatic rollback</sub></td>
+    <td align="center"><sub>Key management: fingerprint, public key, which servers use it</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/import.png" alt="Import hosts from ~/.ssh/config" /></td>
+    <td><img src="docs/screenshots/terminal-de.png" alt="German UI" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Import existing hosts from <code>~/.ssh/config</code></sub></td>
+    <td align="center"><sub>English and German UI</sub></td>
+  </tr>
+</table>
+
+<sub>Screenshots use made-up demo data. To reproduce them: <code>pnpm dev</code> and open <code>http://localhost:1420/?demo</code> (see <code>src/lib/demo.ts</code>).</sub>
+
 The use case this was built for: you SSH into a lot of boxes every day, but setting up SSH keys per server is enough friction that you end up typing passwords. terminalox fixes that — add a server once, click **Deploy + harden**, and the app:
 
 1. generates an Ed25519 keypair,
