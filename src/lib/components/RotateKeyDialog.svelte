@@ -2,6 +2,7 @@
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { t, tm } from "$lib/i18n/index.svelte";
   import type { RotateReport, Server } from "$lib/types";
 
   let { server, onClose }: { server: Server; onClose: () => void } = $props();
@@ -23,7 +24,7 @@
       report = await api.rotateKey(server.id);
       await app.refresh();
       if (report.warnings.length === 0) {
-        toast.success(`Key für „${server.name}“ rotiert`);
+        toast.success(t("rotate.toast", { name: server.name }));
       }
     } catch (e) {
       error = String(e);
@@ -37,45 +38,45 @@
 
 <div class="overlay">
   <div class="dialog" role="dialog" aria-modal="true">
-    <h3>Key rotieren: {server.name}</h3>
+    <h3>{t("rotate.title", { name: server.name })}</h3>
 
     {#if !report}
-      <p>terminalox ersetzt den Key dieses Servers, ohne dass du den Zugang verlierst:</p>
+      <p>{t("rotate.intro")}</p>
       <ol>
-        <li>Neuen Ed25519-Key erzeugen</li>
-        <li>Über den aktuellen Key in <code>authorized_keys</code> eintragen</li>
-        <li>Mit einer neuen Verbindung prüfen, dass der neue Key funktioniert</li>
-        <li>Server-Eintrag umstellen, danach den alten Key vom Server entfernen</li>
+        <li>{t("rotate.step1")}</li>
+        <li>{t("rotate.step2")}</li>
+        <li>{t("rotate.step3")}</li>
+        <li>{t("rotate.step4")}</li>
       </ol>
       <p class="muted">
-        Schlägt Schritt 3 fehl, wird der neue Key wieder entfernt und alles bleibt beim Alten.
-        {#if oldKey}Der alte Key „{oldKey.name}“ wird lokal nur gelöscht, wenn kein anderer Server ihn nutzt.{/if}
-        Die Härtung bleibt unverändert.
+        {t("rotate.safety")}
+        {#if oldKey}{t("rotate.oldKeyLocal", { name: oldKey.name })}{/if}
+        {t("rotate.hardeningUnchanged")}
       </p>
     {:else}
       <ul class="result">
-        <li class="ok">✓ Neuer Key „{report.newKey.name}“ aktiv</li>
+        <li class="ok">✓ {t("rotate.newActive", { name: report.newKey.name })}</li>
         <li class:ok={report.oldKeyRevoked} class:bad={!report.oldKeyRevoked}>
-          {report.oldKeyRevoked ? "✓ Alter Key vom Server entfernt" : "✗ Alter Key noch auf dem Server"}
+          {report.oldKeyRevoked ? `✓ ${t("rotate.oldRevoked")}` : `✗ ${t("rotate.oldStill")}`}
         </li>
         {#if report.oldKeyRemovedLocally}
-          <li class="ok">✓ Alte Key-Dateien lokal gelöscht</li>
+          <li class="ok">✓ {t("rotate.oldDeleted")}</li>
         {:else if report.oldKeyStillUsedBy.length > 0}
-          <li>Alter Key bleibt lokal — noch genutzt von: {report.oldKeyStillUsedBy.join(", ")}</li>
+          <li>{t("rotate.oldKept", { servers: report.oldKeyStillUsedBy.join(", ") })}</li>
         {/if}
       </ul>
-      {#each report.warnings as w}<p class="warn">⚠ {w}</p>{/each}
+      {#each report.warnings as w}<p class="warn">⚠ {tm(w)}</p>{/each}
     {/if}
 
     {#if error}<p class="error">{error}</p>{/if}
 
     <div class="buttons">
       {#if report}
-        <button class="primary" onclick={onClose}>Fertig</button>
+        <button class="primary" onclick={onClose}>{t("common.done")}</button>
       {:else}
-        <button onclick={onClose} disabled={running}>Abbrechen</button>
+        <button onclick={onClose} disabled={running}>{t("common.cancel")}</button>
         <button class="primary" onclick={run} disabled={running}>
-          {running ? "Rotiere …" : "Key rotieren"}
+          {running ? t("rotate.running") : t("actions.rotate")}
         </button>
       {/if}
     </div>

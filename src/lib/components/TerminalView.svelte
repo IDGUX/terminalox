@@ -9,6 +9,7 @@
   import { isAppShortcut } from "$lib/shortcuts";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { t, tm, type MessageKey } from "$lib/i18n/index.svelte";
   import type { Server, SessionClosedEvent } from "$lib/types";
 
   let {
@@ -63,10 +64,10 @@
   function onClosed(ev: SessionClosedEvent) {
     status = "closed";
     statusDetail = ev.error
-      ? `Fehler: ${ev.error}`
+      ? t("term.error", { detail: tm(ev.error) })
       : ev.exitCode !== null && ev.exitCode !== undefined
-        ? `Exit ${ev.exitCode}`
-        : "Verbindung beendet";
+        ? t("term.exit", { code: ev.exitCode })
+        : t("term.ended");
   }
 
   async function start() {
@@ -123,7 +124,7 @@
   async function disconnect() {
     await teardownSession();
     status = "closed";
-    statusDetail = "Manuell getrennt";
+    statusDetail = t("term.manual");
   }
 
   function resize() {
@@ -133,7 +134,7 @@
   /** Links öffnen im System-Browser, nie im App-Fenster. */
   function openLink(_ev: MouseEvent, uri: string) {
     if (!/^https?:\/\//i.test(uri)) return;
-    openUrl(uri).catch((e) => toast.error(`Link konnte nicht geöffnet werden: ${e}`));
+    openUrl(uri).catch((e) => toast.error(t("term.linkFailed", { detail: String(e) })));
   }
 
   onMount(async () => {
@@ -187,24 +188,24 @@
         type="button"
         class="hbtn"
         onclick={reconnect}
-        title="Erneut verbinden"
-        aria-label="Erneut verbinden"
+        title={t("term.reconnect")}
+        aria-label={t("term.reconnect")}
       >↻</button>
       <button
         type="button"
         class="hbtn"
         onclick={disconnect}
         disabled={status !== "connected" && status !== "connecting"}
-        title="Verbindung beenden"
-        aria-label="Verbindung beenden"
+        title={t("term.disconnect")}
+        aria-label={t("term.disconnect")}
       >⏻</button>
       {#if canSplit && onSplit}
         <button
           type="button"
           class="hbtn"
           onclick={onSplit}
-          title="Neues Terminal (Split)"
-          aria-label="Neues Terminal"
+          title={t("term.split")}
+          aria-label={t("term.newTerminal")}
         >＋</button>
       {/if}
       {#if canClose && onClose}
@@ -212,8 +213,8 @@
           type="button"
           class="hbtn close"
           onclick={onClose}
-          title="Diesen Bereich schließen"
-          aria-label="Bereich schließen"
+          title={t("term.closePane")}
+          aria-label={t("term.closePaneAria")}
         >✕</button>
       {/if}
       <div
@@ -221,7 +222,7 @@
         class:ok={status === "connected"}
         class:bad={status === "error" || status === "closed"}
       >
-        {status}{statusDetail ? ` — ${statusDetail}` : ""}
+        {t(`term.status.${status}` as MessageKey)}{statusDetail ? ` — ${statusDetail}` : ""}
       </div>
     </div>
   </div>

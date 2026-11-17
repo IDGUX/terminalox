@@ -13,6 +13,7 @@ use crate::access::{self, Login};
 use crate::error::{AppError, AppResult};
 use crate::keygen;
 use crate::models::{AuthMode, KeyInfo};
+use crate::msg::Msg;
 use crate::secrets::SecretKind;
 use crate::ssh::client::Credential;
 use crate::ssh::{deploy, revoke};
@@ -27,7 +28,7 @@ pub struct RotateReport {
     pub old_key_removed_locally: bool,
     /// Other servers still use the old key, so it stays on this machine.
     pub old_key_still_used_by: Vec<String>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Msg>,
 }
 
 fn rotated_name(server_name: &str, existing: &[KeyInfo]) -> String {
@@ -65,9 +66,11 @@ pub async fn rotate_key(server_id: Uuid, state: State<'_, AppState>) -> AppResul
             .find_server(server_id)
             .ok_or(AppError::UnknownServer)?;
         let AuthMode::Key { key_id } = server.auth else {
-            return Err(AppError::Invalid(
-                "Key-Rotation ist nur für Server mit terminalox-Key möglich.".into(),
-            ));
+            return Err(msg!(
+                "rotate_key_only",
+                "Key rotation is only possible for servers with a terminalox key."
+            )
+            .into());
         };
         let old_key = store.find_key(key_id).ok_or(AppError::UnknownKey)?.clone();
         let login = Login::new(&store, &state.secrets, server, None)?;
@@ -104,9 +107,12 @@ pub async fn rotate_key(server_id: Uuid, state: State<'_, AppState>) -> AppResul
         // Undo step 2 over the old key, which still works.
         let _ = revoke::revoke_keeping_other(&old_login, &new_key.public_openssh).await;
         cleanup_local(&new_key);
-        return Err(AppError::Other(format!(
-            "Der neue Key wurde vom Server nicht akzeptiert ({e}). Es bleibt beim alten Key."
-        )));
+        return Err(msg!(
+            "rotate_new_key_rejected",
+            "The server did not accept the new key ({detail}). The old key stays in use.",
+            detail = e.to_msg().text
+        )
+        .into());
     }
 
     // 4. Switch the server entry.
@@ -139,9 +145,10 @@ pub async fn rotate_key(server_id: Uuid, state: State<'_, AppState>) -> AppResul
     // 5. Revoke the old key over the new one.
     match revoke::revoke_keeping_other(&new_login, &old_key.public_openssh).await {
         Ok(()) => report.old_key_revoked = true,
-        Err(e) => report.warnings.push(format!(
-            "Der alte Key konnte nicht vom Server entfernt werden: {e}. \
-             Er bleibt in authorized_keys eingetragen."
+        Err(e) => report.warnings.push(msg!(
+            "rotate_revoke_failed",
+            "The old key could not be removed from the server: {detail}. It stays in authorized_keys.",
+            detail = e.to_msg().text
         )),
     }
 
@@ -155,8 +162,10 @@ pub async fn rotate_key(server_id: Uuid, state: State<'_, AppState>) -> AppResul
                 store.save(&state.store_file())?;
                 report.old_key_removed_locally = true;
             }
-            Err(e) => report.warnings.push(format!(
-                "Alte Key-Dateien konnten nicht gelöscht werden: {e}"
+            Err(e) => report.warnings.push(msg!(
+                "rotate_delete_failed",
+                "Old key files could not be deleted: {detail}",
+                detail = e
             )),
         }
     }

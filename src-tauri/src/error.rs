@@ -1,6 +1,7 @@
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::msg::Msg;
 use crate::ssh::client::HostKeyRejection;
 
 /// A password or key passphrase the backend needs but does not have.
@@ -19,7 +20,7 @@ pub struct SecretRequest {
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("Dateizugriff: {0}")]
+    #[error("File access: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("JSON: {0}")]
@@ -28,51 +29,76 @@ pub enum AppError {
     #[error("SSH: {0}")]
     Ssh(#[from] russh::Error),
 
-    #[error("SSH-Key: {0}")]
+    #[error("SSH key: {0}")]
     SshKey(#[from] russh::keys::Error),
 
-    #[error("Server nicht gefunden")]
+    #[error("Server not found")]
     UnknownServer,
 
-    #[error("Key nicht gefunden")]
+    #[error("Key not found")]
     UnknownKey,
 
-    #[error("Ordner nicht gefunden")]
+    #[error("Folder not found")]
     UnknownFolder,
 
-    #[error("Terminal-Sitzung nicht gefunden")]
+    #[error("Terminal session not found")]
     UnknownSession,
 
-    #[error("Anmeldung fehlgeschlagen")]
+    #[error("Authentication failed")]
     AuthFailed,
 
-    #[error("Befehl auf dem Server fehlgeschlagen: {0}")]
+    #[error("Command on the server failed: {0}")]
     RemoteCommandFailed(String),
 
+    /// A translatable message (validation, refused operations …).
     #[error("{0}")]
-    Invalid(String),
+    Msg(Msg),
 
     /// Low-level: a key file needs a (different) passphrase. Commands turn this
     /// into `SecretRequired` with the key's id and name.
-    #[error("Key ist verschlüsselt")]
+    #[error("Key is encrypted")]
     KeyPassphrase { wrong: bool },
 
-    #[error("{}", secret_message(.0))]
+    #[error("{}", secret_msg(.0))]
     SecretRequired(SecretRequest),
 
-    #[error("Host-Key von {}:{} nicht bestätigt — Verbindung abgebrochen", .0.host, .0.port)]
+    #[error("Host key of {}:{} not confirmed, connection aborted", .0.host, .0.port)]
     HostKey(HostKeyRejection),
 
+    /// Technical detail without translation (library errors etc.).
     #[error("{0}")]
     Other(String),
 }
 
-fn secret_message(r: &SecretRequest) -> String {
+fn secret_msg(r: &SecretRequest) -> Msg {
+    let label = r.label.clone();
     match (r.kind, r.wrong) {
-        ("passphrase", false) => format!("Passphrase für Key „{}“ erforderlich", r.label),
-        ("passphrase", true) => format!("Passphrase für Key „{}“ ist falsch", r.label),
-        (_, false) => format!("Passwort für „{}“ erforderlich", r.label),
-        (_, true) => format!("Passwort für „{}“ wurde abgelehnt", r.label),
+        ("passphrase", false) => msg!(
+            "passphrase_required",
+            "Passphrase for key \"{label}\" required",
+            label = label
+        ),
+        ("passphrase", true) => msg!(
+            "passphrase_wrong",
+            "Passphrase for key \"{label}\" is wrong",
+            label = label
+        ),
+        (_, false) => msg!(
+            "password_required",
+            "Password for \"{label}\" required",
+            label = label
+        ),
+        (_, true) => msg!(
+            "password_wrong",
+            "Password for \"{label}\" was rejected",
+            label = label
+        ),
+    }
+}
+
+impl From<Msg> for AppError {
+    fn from(m: Msg) -> Self {
+        AppError::Msg(m)
     }
 }
 
@@ -82,37 +108,64 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+impl AppError {
+    /// The error as translatable message (code + params + English text).
+    pub fn to_msg(&self) -> Msg {
+        match self {
+            AppError::Io(e) => msg!("io", "File access: {detail}", detail = e),
+            AppError::Json(e) => msg!("json", "JSON: {detail}", detail = e),
+            AppError::Ssh(e) => msg!("ssh", "SSH: {detail}", detail = e),
+            AppError::SshKey(e) => msg!("ssh_key", "SSH key: {detail}", detail = e),
+            AppError::UnknownServer => msg!("unknown_server", "Server not found"),
+            AppError::UnknownKey => msg!("unknown_key", "Key not found"),
+            AppError::UnknownFolder => msg!("unknown_folder", "Folder not found"),
+            AppError::UnknownSession => msg!("unknown_session", "Terminal session not found"),
+            AppError::AuthFailed => msg!("auth_failed", "Authentication failed"),
+            AppError::RemoteCommandFailed(d) => msg!(
+                "remote_failed",
+                "Command on the server failed: {detail}",
+                detail = d
+            ),
+            AppError::Msg(m) => m.clone(),
+            AppError::KeyPassphrase { .. } => msg!("key_encrypted", "Key is encrypted"),
+            AppError::SecretRequired(r) => secret_msg(r),
+            AppError::HostKey(r) => msg!(
+                "host_key_rejected",
+                "Host key of {host}:{port} not confirmed, connection aborted",
+                host = r.host,
+                port = r.port
+            ),
+            AppError::Other(d) => msg!("other", "{detail}", detail = d),
+        }
+    }
+}
+
 impl Serialize for AppError {
+    /// Always an object: `{ code, params, text }` plus `hostKey` /
+    /// `secretRequired` for errors the frontend resolves by asking the user.
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        // Host-key errors go out structured so the frontend can show a trust prompt;
-        // everything else stays a plain string.
-        if let AppError::HostKey(r) = self {
-            #[derive(Serialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Structured<'a> {
-                message: String,
-                host_key: &'a HostKeyRejection,
-            }
-            return Structured {
-                message: self.to_string(),
-                host_key: r,
-            }
-            .serialize(s);
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Structured<'a> {
+            #[serde(flatten)]
+            msg: Msg,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            host_key: Option<&'a HostKeyRejection>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            secret_required: Option<&'a SecretRequest>,
         }
-        if let AppError::SecretRequired(r) = self {
-            #[derive(Serialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Structured<'a> {
-                message: String,
-                secret_required: &'a SecretRequest,
-            }
-            return Structured {
-                message: self.to_string(),
-                secret_required: r,
-            }
-            .serialize(s);
+        Structured {
+            msg: self.to_msg(),
+            host_key: match self {
+                AppError::HostKey(r) => Some(r),
+                _ => None,
+            },
+            secret_required: match self {
+                AppError::SecretRequired(r) => Some(r),
+                _ => None,
+            },
         }
-        s.serialize_str(&self.to_string())
+        .serialize(s)
     }
 }
 

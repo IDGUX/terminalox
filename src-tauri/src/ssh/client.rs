@@ -188,9 +188,12 @@ pub fn connect(
 
 async fn connect_depth(target: &Target, depth: usize) -> AppResult<Handle<KnownHostsVerify>> {
     if depth > MAX_JUMP_DEPTH {
-        return Err(AppError::Invalid(format!(
-            "Jump-Host-Kette ist länger als {MAX_JUMP_DEPTH} Hops"
-        )));
+        return Err(msg!(
+            "jump_too_long",
+            "Jump host chain is longer than {max} hops",
+            max = MAX_JUMP_DEPTH
+        )
+        .into());
     }
     let rejected = Arc::new(Mutex::new(None));
     let host_key_error =
@@ -214,10 +217,13 @@ async fn connect_depth(target: &Target, depth: usize) -> AppResult<Handle<KnownH
         return match tokio::time::timeout(CONNECT_TIMEOUT, fut).await {
             Ok(Ok(handle)) => Ok(handle),
             Ok(Err(e)) => Err(host_key_error(e.into(), &rejected)),
-            Err(_) => Err(AppError::Other(format!(
-                "Zeitüberschreitung beim Verbinden mit {}:{}",
-                target.host, target.port
-            ))),
+            Err(_) => Err(msg!(
+                "connect_timeout",
+                "Timed out connecting to {host}:{port}",
+                host = target.host,
+                port = target.port
+            )
+            .into()),
         };
     };
 
@@ -233,19 +239,25 @@ async fn connect_depth(target: &Target, depth: usize) -> AppResult<Handle<KnownH
                     wrong: true,
                 })
             }
-            (AppError::AuthFailed, _) => AppError::Other(format!(
-                "Anmeldung am Jump-Host „{}“ fehlgeschlagen",
-                hop.name
-            )),
+            (AppError::AuthFailed, _) => msg!(
+                "jump_auth_failed",
+                "Login to jump host \"{name}\" failed",
+                name = hop.name
+            )
+            .into(),
             (other, _) => other,
         })?;
     let channel = jump
         .channel_open_direct_tcpip(target.host.clone(), target.port as u32, "127.0.0.1", 0)
         .await
         .map_err(|e| {
-            AppError::Other(format!(
-                "Jump-Host {} kann {}:{} nicht erreichen: {e}",
-                hop.target.host, target.host, target.port
+            AppError::from(msg!(
+                "jump_unreachable",
+                "Jump host {jump} cannot reach {host}:{port}: {detail}",
+                jump = hop.name,
+                host = target.host,
+                port = target.port,
+                detail = e
             ))
         })?;
     let handler = KnownHostsVerify {
@@ -258,10 +270,13 @@ async fn connect_depth(target: &Target, depth: usize) -> AppResult<Handle<KnownH
     match tokio::time::timeout(CONNECT_TIMEOUT, fut).await {
         Ok(Ok(handle)) => Ok(handle),
         Ok(Err(e)) => Err(host_key_error(e.into(), &rejected)),
-        Err(_) => Err(AppError::Other(format!(
-            "Zeitüberschreitung beim Verbinden mit {}:{} über Jump-Host",
-            target.host, target.port
-        ))),
+        Err(_) => Err(msg!(
+            "connect_timeout",
+            "Timed out connecting to {host}:{port}",
+            host = target.host,
+            port = target.port
+        )
+        .into()),
     }
 }
 
@@ -291,7 +306,7 @@ pub async fn connect_auth(
 
 pub fn trust_host_key(host: &str, port: u16, key_openssh: &str) -> AppResult<()> {
     let key = PublicKey::from_openssh(key_openssh)
-        .map_err(|e| AppError::Other(format!("ungültiger Host-Key: {e}")))?;
+        .map_err(|e| AppError::Other(format!("invalid host key: {e}")))?;
     // Append only: an outdated entry may stay, but a matching entry wins (as in OpenSSH).
     known_hosts::learn_known_hosts(host, port, &key)?;
     Ok(())
@@ -351,9 +366,12 @@ pub async fn auth_agent(session: &mut Handle<KnownHostsVerify>, user: &str) -> A
 }
 
 fn agent_unavailable(e: russh::keys::Error) -> AppError {
-    AppError::Other(format!(
-        "Kein ssh-agent erreichbar ({e}). Agent starten bzw. SSH_AUTH_SOCK setzen."
-    ))
+    msg!(
+        "agent_unavailable",
+        "No ssh-agent reachable ({detail}). Start an agent or set SSH_AUTH_SOCK.",
+        detail = e
+    )
+    .into()
 }
 
 async fn auth_with_agent<S>(
@@ -373,9 +391,11 @@ where
         })
         .collect();
     if keys.is_empty() {
-        return Err(AppError::Other(
-            "Der ssh-agent hat keine Keys geladen (ssh-add -l).".into(),
-        ));
+        return Err(msg!(
+            "agent_empty",
+            "The ssh-agent has no keys loaded (ssh-add -l)."
+        )
+        .into());
     }
     let rsa_hash = session.best_supported_rsa_hash().await?.flatten();
     for key in keys {

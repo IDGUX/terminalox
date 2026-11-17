@@ -58,9 +58,11 @@ pub async fn import_key(
         {
             // Clean up the file we just wrote before returning.
             let _ = keygen::delete_key_files(&info);
-            return Err(AppError::Invalid(
-                "Dieser Key (Fingerprint) ist bereits importiert".into(),
-            ));
+            return Err(msg!(
+                "key_already_imported",
+                "This key (fingerprint) is already imported"
+            )
+            .into());
         }
     }
     store.keys.push(info.clone());
@@ -98,11 +100,13 @@ pub async fn delete_key(id: Uuid, state: State<'_, AppState>) -> AppResult<()> {
         .map(|s| s.name.clone())
         .collect();
     if !referenced_by.is_empty() {
-        return Err(AppError::Other(format!(
-            "Key wird noch von {} Server(n) genutzt: {}. Zuerst diese Server löschen oder auf Passwort-Auth umstellen.",
-            referenced_by.len(),
-            referenced_by.join(", ")
-        )));
+        return Err(msg!(
+            "key_in_use",
+            "Key is still used by {count} server(s): {servers}. Delete these servers or switch them to password auth first.",
+            count = referenced_by.len(),
+            servers = referenced_by.join(", ")
+        )
+        .into());
     }
 
     let idx = store

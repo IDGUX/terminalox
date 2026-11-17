@@ -1,5 +1,6 @@
 <script lang="ts">
   import { secretPrompt } from "$lib/stores/secret.svelte";
+  import { t } from "$lib/i18n/index.svelte";
 
   const req = $derived(secretPrompt.current?.request ?? null);
   const isPassphrase = $derived(req?.kind === "passphrase");
@@ -25,24 +26,20 @@
 
 {#if req}
   <div class="overlay">
-    <div role="dialog" aria-modal="true" aria-label="Passwort-Abfrage">
+    <div role="dialog" aria-modal="true" aria-label={t("secret.aria")}>
     <form class="dialog" onsubmit={submit}>
       <h3>
-        {#if isPassphrase}Passphrase für Key „{req.label}“
-        {:else}Passwort für „{req.label}“{/if}
+        {isPassphrase
+          ? t("secret.passphraseTitle", { label: req.label })
+          : t("secret.passwordTitle", { label: req.label })}
       </h3>
       {#if req.wrong}
         <p class="error">
-          {isPassphrase ? "Die Passphrase war falsch." : "Das Passwort wurde vom Server abgelehnt."}
-          Bitte erneut eingeben.
+          {isPassphrase ? t("secret.passphraseWrong") : t("secret.passwordWrong")}
         </p>
       {:else}
         <p>
-          {#if isPassphrase}
-            Der Key ist mit einer Passphrase geschützt.
-          {:else}
-            Der Server verlangt ein Passwort.
-          {/if}
+          {isPassphrase ? t("secret.passphraseBody") : t("secret.passwordBody")}
         </p>
       {/if}
 
@@ -52,25 +49,25 @@
         bind:value
         autofocus
         autocomplete="off"
-        placeholder={isPassphrase ? "Passphrase" : "SSH-Passwort"}
+        placeholder={isPassphrase ? t("secret.passphrase") : t("secret.sshPassword")}
       />
       <label class="check">
         <input type="checkbox" bind:checked={remember} />
-        Im Schlüsselbund des Betriebssystems merken
+        {t("secret.remember")}
       </label>
       <p class="hint">
-        Ohne Häkchen gilt die Eingabe nur, bis terminalox beendet wird.
+        {t("secret.sessionOnly")}
         {#if !isPassphrase}
-          Noch bequemer: „SSH-Key deployen“ — danach braucht dieser Server kein Passwort mehr.
+          {t("secret.deployTip")}
         {/if}
       </p>
 
       {#if secretPrompt.error}<p class="error">{secretPrompt.error}</p>{/if}
 
       <div class="buttons">
-        <button type="button" onclick={() => secretPrompt.cancel()}>Abbrechen</button>
+        <button type="button" onclick={() => secretPrompt.cancel()}>{t("common.cancel")}</button>
         <button type="submit" class="primary" disabled={!value || secretPrompt.busy}>
-          {secretPrompt.busy ? "Prüfe …" : "Weiter"}
+          {secretPrompt.busy ? t("common.checking") : t("common.continue")}
         </button>
       </div>
     </form>

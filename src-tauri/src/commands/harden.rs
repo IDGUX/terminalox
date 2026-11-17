@@ -6,11 +6,16 @@ use uuid::Uuid;
 use crate::access::Login;
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
+use crate::msg::Msg;
 use crate::ssh::harden::{self, HardenReadiness, VerifyOutcome};
 use crate::state::AppState;
 
-const PASSWORD_AUTH_HINT: &str =
-    "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen.";
+fn password_auth_hint() -> Msg {
+    msg!(
+        "harden_password_auth",
+        "The server still uses password auth, please deploy a key first."
+    )
+}
 
 /// Key/agent login for a server; `None` if it still uses password auth.
 async fn key_login(state: &State<'_, AppState>, server_id: Uuid) -> AppResult<Option<Login>> {
@@ -33,7 +38,7 @@ pub struct HardenReport {
     pub sshd_reloaded: bool,
     pub password_auth_confirmed_disabled: bool,
     pub hardened: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Msg>,
 }
 
 #[tauri::command]
@@ -43,7 +48,7 @@ pub async fn check_harden_readiness(
 ) -> AppResult<HardenReadiness> {
     let Some(login) = key_login(&state, server_id).await? else {
         return Ok(HardenReadiness::Unavailable {
-            reason: PASSWORD_AUTH_HINT.into(),
+            reason: password_auth_hint(),
         });
     };
 
@@ -52,7 +57,11 @@ pub async fn check_harden_readiness(
         Err(e @ (AppError::HostKey(_) | AppError::SecretRequired(_))) => return Err(e),
         Err(e) => {
             return Ok(HardenReadiness::Unavailable {
-                reason: format!("Key-Auth funktioniert nicht: {e}"),
+                reason: msg!(
+                    "harden_key_auth_failed",
+                    "Key login does not work: {detail}",
+                    detail = e.to_msg().text
+                ),
             });
         }
     };
@@ -67,7 +76,7 @@ pub async fn harden_server(
 ) -> AppResult<HardenReport> {
     let login = key_login(&state, server_id)
         .await?
-        .ok_or_else(|| AppError::Invalid(PASSWORD_AUTH_HINT.into()))?;
+        .ok_or_else(|| AppError::from(password_auth_hint()))?;
 
     let mut report = HardenReport::default();
 
@@ -79,9 +88,11 @@ pub async fn harden_server(
         }
         Err(e @ (AppError::HostKey(_) | AppError::SecretRequired(_))) => return Err(e),
         Err(e) => {
-            report.warnings.push(format!(
-                "Key-Auth-Check fehlgeschlagen: {e}. Härten wurde nicht versucht."
+            report.warnings.push(msg!(
+                "harden_precheck_failed",
+                "Key login check failed, hardening was not attempted."
             ));
+            report.warnings.push(e.to_msg());
             return Ok(report);
         }
     };
@@ -94,12 +105,7 @@ pub async fn harden_server(
     report.password_auth_confirmed_disabled = outcome.password_auth_confirmed_disabled;
     report.hardened = outcome.all_ok();
     if !outcome.all_ok() {
-        let msg = if outcome.stderr.trim().is_empty() {
-            "Härten fehlgeschlagen (kein Detail vom Server)".to_string()
-        } else {
-            format!("Härten fehlgeschlagen: {}", outcome.stderr.trim())
-        };
-        report.warnings.push(msg);
+        report.warnings.push(outcome.failure_msg());
     }
 
     // Step 3: persist hardened flag.
@@ -124,7 +130,7 @@ pub struct VerifyHardenReport {
     /// `Some(false)` = at least one password method is enabled.
     /// `null` = couldn't determine (no sudo path).
     pub effective_password_auth_off: Option<bool>,
-    pub effective_check_error: Option<String>,
+    pub effective_check_error: Option<Msg>,
     /// Final verdict the app uses.
     pub is_hardened: bool,
     /// `true` if we updated the persisted server flag as a result.
@@ -139,7 +145,10 @@ pub async fn verify_server_hardening(
     state: State<'_, AppState>,
 ) -> AppResult<VerifyHardenReport> {
     let login = key_login(&state, server_id).await?.ok_or_else(|| {
-        AppError::Invalid("Prüfung nur für Server mit Key- oder Agent-Login verfügbar.".into())
+        AppError::from(msg!(
+            "verify_key_only",
+            "Verification is only available for servers with key or agent login."
+        ))
     })?;
     let was_hardened = login.server.hardened;
 

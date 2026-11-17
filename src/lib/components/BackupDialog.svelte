@@ -3,6 +3,7 @@
   import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { errorText, formatDateTime, t, tm, type Msg } from "$lib/i18n/index.svelte";
 
   let { mode, onClose }: { mode: "export" | "import"; onClose: () => void } = $props();
 
@@ -40,6 +41,7 @@
     keysUpdated: number;
     keysSkipped: number;
     keyFileConflicts: string[];
+    serversInvalid: { name: string; msg: Msg }[];
   }
 
   interface ExportReport {
@@ -57,17 +59,17 @@
     error = null;
     if (useEncryption) {
       if (passphrase.length < 8) {
-        error = "Passphrase muss mindestens 8 Zeichen haben.";
+        error = t("backup.errShort");
         return;
       }
       if (passphrase !== passphrase2) {
-        error = "Passphrases stimmen nicht überein.";
+        error = t("backup.errMismatch");
         return;
       }
     }
     const today = new Date().toISOString().slice(0, 10);
     const target = await saveDialog({
-      title: "Backup speichern",
+      title: t("backup.saveTitle"),
       defaultPath: `terminalox-backup-${today}.json`,
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
@@ -80,11 +82,13 @@
       });
       result = report;
       toast.success(
-        `Backup gespeichert: ${report.servers} Server, ${report.keys} Keys` +
-          (report.encrypted ? " (verschlüsselt)" : ""),
+        t(report.encrypted ? "backup.toastSavedEnc" : "backup.toastSaved", {
+          servers: report.servers,
+          keys: report.keys,
+        }),
       );
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       exporting = false;
     }
@@ -94,7 +98,7 @@
     const sel = await openDialog({
       multiple: false,
       directory: false,
-      title: "Backup-Datei wählen",
+      title: t("backup.pickTitle"),
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (typeof sel === "string") {
@@ -119,14 +123,14 @@
         preview = rep;
       }
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
   async function doImport() {
     if (!preview) return;
     if (preview.needsPassphrase) {
-      error = "Passphrase fehlt";
+      error = t("backup.errNoPassphrase");
       return;
     }
     importing = true;
@@ -142,10 +146,15 @@
       result = rep;
       await app.refresh();
       toast.success(
-        `Import: +${rep.serversAdded} / ~${rep.serversUpdated} Server, +${rep.keysAdded} / ~${rep.keysUpdated} Keys`,
+        t("backup.toastImported", {
+          sa: rep.serversAdded,
+          su: rep.serversUpdated,
+          ka: rep.keysAdded,
+          ku: rep.keysUpdated,
+        }),
       );
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       importing = false;
     }
@@ -160,57 +169,50 @@
 <div class="overlay">
   <div class="dialog">
     {#if mode === "export"}
-      <h3>Backup erstellen</h3>
+      <h3>{t("backup.exportTitle")}</h3>
 
       {#if !result}
-        <p class="hint">
-          Exportiert deine {app.servers.length} Server und {app.keys.length} Keys
-          (inkl. Private Keys) in eine einzelne JSON-Datei. Übertrag auf einen anderen Rechner
-          (macOS → Windows → Linux) oder als Backup aufbewahren.
-        </p>
+        <p class="hint">{t("backup.exportIntro", { servers: app.servers.length, keys: app.keys.length })}</p>
 
         <form onsubmit={doExport}>
           <label class="checkbox">
             <input type="checkbox" bind:checked={useEncryption} />
             <span>
-              Mit Passphrase verschlüsseln <em>(empfohlen)</em>
-              <br /><span class="sub">AES-256-GCM, Argon2id-Key-Derivation. Ohne Passphrase liegen Private Keys im Klartext in der Datei.</span>
+              {t("backup.encrypt")} <em>({t("backup.recommended")})</em>
+              <br /><span class="sub">{t("backup.encryptHint")}</span>
             </span>
           </label>
 
           {#if useEncryption}
             <label>
-              Passphrase (min. 8 Zeichen)
+              {t("backup.passphraseMin")}
               <input type="password" bind:value={passphrase} autocomplete="new-password" />
             </label>
             <label>
-              Passphrase wiederholen
+              {t("backup.passphraseRepeat")}
               <input type="password" bind:value={passphrase2} autocomplete="new-password" />
             </label>
           {:else}
-            <div class="danger-box">
-              ⚠ Ohne Verschlüsselung enthält die Datei deine Private Keys im Klartext.
-              Nur an sicheren Orten ablegen (Password-Manager, verschlüsselter Container).
-            </div>
+            <div class="danger-box">⚠ {t("backup.plainWarning")}</div>
           {/if}
 
           {#if error}<p class="error">{error}</p>{/if}
 
           <div class="buttons">
-            <button type="button" onclick={onClose}>Abbrechen</button>
+            <button type="button" onclick={onClose}>{t("common.cancel")}</button>
             <button type="submit" class="primary" disabled={exporting}>
-              {exporting ? "…" : "Speichern als…"}
+              {exporting ? "…" : t("backup.saveAs")}
             </button>
           </div>
         </form>
       {:else}
         {@const r = result as ExportReport}
         <p class="success">
-          ✓ Backup gespeichert<br /><code>{r.targetPath}</code>
+          ✓ {t("backup.saved")}<br /><code>{r.targetPath}</code>
         </p>
         <p class="hint">
-          {r.servers} Server, {r.keys} Keys —
-          {r.encrypted ? "verschlüsselt (AES-256-GCM)" : "unverschlüsselt"}
+          {t("backup.summary", { servers: r.servers, keys: r.keys })} —
+          {r.encrypted ? t("backup.encryptedAes") : t("backup.unencrypted")}
         </p>
         <div class="buttons">
           <button class="primary" onclick={onClose}>OK</button>
@@ -218,89 +220,90 @@
       {/if}
     {:else}
       <!-- IMPORT -->
-      <h3>Backup wiederherstellen / importieren</h3>
+      <h3>{t("backup.importTitle")}</h3>
 
       {#if !result}
-        <p class="hint">
-          Lädt eine Backup-Datei. Key-Dateien werden im <code>~/.ssh/</code>-Verzeichnis
-          dieses Rechners angelegt (Pfade werden automatisch plattformgerecht umgeschrieben).
-        </p>
+        <p class="hint">{t("backup.importIntro")}</p>
 
         <label>
-          Backup-Datei
+          {t("backup.file")}
           <div class="row">
-            <input bind:value={sourcePath} placeholder="Pfad zur Backup-Datei" />
-            <button type="button" onclick={pickImportFile}>Durchsuchen…</button>
+            <input bind:value={sourcePath} placeholder={t("backup.filePlaceholder")} />
+            <button type="button" onclick={pickImportFile}>{t("common.browse")}</button>
           </div>
         </label>
 
         {#if sourcePath && !preview && !error}
-          <button type="button" onclick={inspect}>Vorschau laden</button>
+          <button type="button" onclick={inspect}>{t("backup.loadPreview")}</button>
         {/if}
 
         {#if preview?.encrypted}
           <label>
-            Passphrase
+            {t("secret.passphrase")}
             <div class="row">
               <input type="password" bind:value={importPassphrase} autocomplete="current-password" />
-              <button type="button" onclick={inspect}>Prüfen</button>
+              <button type="button" onclick={inspect}>{t("backup.check")}</button>
             </div>
           </label>
         {/if}
 
         {#if preview && !preview.needsPassphrase}
           <div class="preview">
-            <h4>Inhalt</h4>
+            <h4>{t("backup.contents")}</h4>
             <p>
-              Version {preview.version} · Exportiert {preview.exportedAt
-                ? new Date(preview.exportedAt).toLocaleString()
-                : "?"}
-              · Quelle: {preview.sourcePlatform ?? "?"}
-              {#if preview.encrypted}· 🔒 verschlüsselt{/if}
+              {t("backup.meta", {
+                version: preview.version ?? "?",
+                date: preview.exportedAt ? formatDateTime(preview.exportedAt) : "?",
+                platform: preview.sourcePlatform ?? "?",
+              })}
+              {#if preview.encrypted}· 🔒 {t("backup.encryptedShort")}{/if}
             </p>
             <p>
-              <strong>{preview.servers}</strong> Server: {preview.serverNames.join(", ") || "—"}
+              <strong>{preview.servers}</strong> {t("backup.serversLabel")}: {preview.serverNames.join(", ") || "—"}
             </p>
             <p>
-              <strong>{preview.keys}</strong> Keys: {preview.keyNames.join(", ") || "—"}
+              <strong>{preview.keys}</strong> {t("backup.keysLabel")}: {preview.keyNames.join(", ") || "—"}
             </p>
 
             <label class="checkbox">
               <input type="checkbox" bind:checked={replaceExisting} />
-              <span>Bestehende Server/Keys mit gleicher ID überschreiben</span>
+              <span>{t("backup.replace")}</span>
             </label>
-            <p class="sub">
-              Ohne Haken werden Duplikate übersprungen (sicheres Mergen). Mit Haken
-              werden sie mit den Backup-Daten überschrieben.
-            </p>
+            <p class="sub">{t("backup.replaceHint")}</p>
           </div>
         {/if}
 
         {#if error}<p class="error">{error}</p>{/if}
 
         <div class="buttons">
-          <button type="button" onclick={onClose}>Abbrechen</button>
+          <button type="button" onclick={onClose}>{t("common.cancel")}</button>
           {#if preview && !preview.needsPassphrase}
             <button class="primary" disabled={importing} onclick={doImport}>
-              {importing ? "…" : "Importieren"}
+              {importing ? "…" : t("backup.import")}
             </button>
           {/if}
         </div>
       {:else}
         {@const r = result as ImportReport}
-        <p class="success">✓ Import abgeschlossen</p>
+        <p class="success">✓ {t("backup.importDone")}</p>
         <ul class="result-list">
-          <li>Server hinzugefügt: <strong>{r.serversAdded}</strong></li>
-          <li>Server aktualisiert: <strong>{r.serversUpdated}</strong></li>
-          <li>Server übersprungen: <strong>{r.serversSkipped}</strong></li>
-          <li>Keys hinzugefügt: <strong>{r.keysAdded}</strong></li>
-          <li>Keys aktualisiert: <strong>{r.keysUpdated}</strong></li>
-          <li>Keys übersprungen: <strong>{r.keysSkipped}</strong></li>
+          <li>{t("backup.serversAdded")}: <strong>{r.serversAdded}</strong></li>
+          <li>{t("backup.serversUpdated")}: <strong>{r.serversUpdated}</strong></li>
+          <li>{t("backup.serversSkipped")}: <strong>{r.serversSkipped}</strong></li>
+          <li>{t("backup.keysAdded")}: <strong>{r.keysAdded}</strong></li>
+          <li>{t("backup.keysUpdated")}: <strong>{r.keysUpdated}</strong></li>
+          <li>{t("backup.keysSkipped")}: <strong>{r.keysSkipped}</strong></li>
         </ul>
+        {#if r.serversInvalid?.length > 0}
+          <p class="warn">⚠ {t("backup.serversInvalid", { count: r.serversInvalid.length })}</p>
+          <ul class="conflicts">
+            {#each r.serversInvalid as p}
+              <li>{p.name}: {tm(p.msg)}</li>
+            {/each}
+          </ul>
+        {/if}
         {#if r.keyFileConflicts.length > 0}
-          <p class="warn">
-            ⚠ {r.keyFileConflicts.length} Key-Dateipfad-Kollisionen — wurden umbenannt:
-          </p>
+          <p class="warn">⚠ {t("backup.conflicts", { count: r.keyFileConflicts.length })}</p>
           <ul class="conflicts">
             {#each r.keyFileConflicts as c}
               <li>{c}</li>

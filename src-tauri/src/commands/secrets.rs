@@ -11,7 +11,7 @@ fn kind_of(kind: &str) -> AppResult<SecretKind> {
     match kind {
         "password" => Ok(SecretKind::ServerPassword),
         "passphrase" => Ok(SecretKind::KeyPassphrase),
-        other => Err(AppError::Invalid(format!("unbekannte Secret-Art: {other}"))),
+        other => Err(AppError::Other(format!("unknown secret kind: {other}"))),
     }
 }
 

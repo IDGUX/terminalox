@@ -16,6 +16,7 @@
   import RotateKeyDialog from "$lib/components/RotateKeyDialog.svelte";
   import ConfigImportDialog from "$lib/components/ConfigImportDialog.svelte";
   import { app } from "$lib/stores/app.svelte";
+  import { errorText, i18n, t } from "$lib/i18n/index.svelte";
   import type { HardenReadiness, Server, Uuid } from "$lib/types";
 
   let addDialog = $state<{ folderId: Uuid | null; template: Server | null } | null>(null);
@@ -31,11 +32,15 @@
   let configImport = $state(false);
   let loadError = $state<string | null>(null);
 
+  $effect(() => {
+    document.documentElement.lang = i18n.locale;
+  });
+
   onMount(async () => {
     try {
       await app.refresh();
     } catch (e) {
-      loadError = String(e);
+      loadError = errorText(e);
     }
   });
 </script>
@@ -45,7 +50,7 @@
 
   <div class="body">
     {#if loadError}
-      <div class="splash error">Fehler beim Laden: {loadError}</div>
+      <div class="splash error">{t("page.loadError", { error: loadError })}</div>
     {:else if app.view === "servers"}
       <Sidebar
         onAdd={(folderId) => (addDialog = { folderId: folderId ?? null, template: null })}
@@ -66,14 +71,9 @@
           {/key}
         {:else}
           <div class="splash">
-            <h1>Servers</h1>
-            <p>Wähle einen Server links, oder füge einen neuen hinzu (<strong>+</strong>).</p>
-            <p class="small">
-              Workflow: Server hinzufügen (oder aus <code>~/.ssh/config</code> importieren) →
-              einmal mit Passwort verbinden →
-              „SSH-Key deployen + Härten" → ab jetzt ohne Passwort,
-              Passwort-Login serverseitig aus.
-            </p>
+            <h1>{t("page.title")}</h1>
+            <p>{t("page.intro")}</p>
+            <p class="small">{t("page.workflow")}</p>
           </div>
         {/if}
       </main>

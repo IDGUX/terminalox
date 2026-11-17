@@ -17,7 +17,7 @@ pub async fn revoke_on_authenticated(
 ) -> AppResult<()> {
     let key_line = public_key_openssh.trim();
     if key_line.is_empty() || key_line.contains(['\r', '\n']) {
-        return Err(AppError::Other("invalid public key line".into()));
+        return Err(msg!("invalid_public_key", "Invalid public key line").into());
     }
     let escaped = key_line.replace('\'', "'\\''");
     let require_other = if require_other_key { "1" } else { "0" };
@@ -63,11 +63,11 @@ mv -- "$tmp" "$file"
 
     let code = exit.unwrap_or(1);
     if code == 3 {
-        return Err(AppError::Other(
-            "Auf dem Server ist außer diesem kein weiterer SSH-Key hinterlegt. \
-             Ohne Passwort würdest du dich aussperren, deshalb bleibt der Key bestehen."
-                .into(),
-        ));
+        return Err(msg!(
+            "revoke_last_key",
+            "No other SSH key is set up on the server. Without a password you would lock yourself out, so the key stays."
+        )
+        .into());
     }
     if code != 0 {
         let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();

@@ -4,6 +4,7 @@
   import { toast } from "$lib/stores/toast.svelte";
   import type { AuthMode, Server, Uuid } from "$lib/types";
   import ColorPicker from "./ColorPicker.svelte";
+  import { errorText, t } from "$lib/i18n/index.svelte";
   import JumpHostSelect from "./JumpHostSelect.svelte";
 
   let { server, onClose }: { server: Server; onClose: () => void } = $props();
@@ -47,7 +48,7 @@
     e.preventDefault();
     error = null;
     if (authMode === "key" && !keyId) {
-      error = "Bitte einen Key auswählen.";
+      error = t("server.pickKey");
       return;
     }
     submitting = true;
@@ -69,10 +70,10 @@
       if ((folderId || null) !== (server.folder_id ?? null)) {
         await app.moveServer(originalId, folderId || null);
       }
-      toast.success(`Server „${updated.name}" aktualisiert`);
+      toast.success(t("edit.toast", { name: updated.name }));
       onClose();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       submitting = false;
     }
@@ -86,32 +87,32 @@
 <!-- Kein Schließen per Klick daneben: ein verirrter Klick würde alle Eingaben verwerfen. -->
 <div class="overlay">
   <form class="dialog" onsubmit={submit}>
-    <h3>Server bearbeiten</h3>
+    <h3>{t("edit.title")}</h3>
 
     <label>
-      Name
+      {t("server.name")}
       <input bind:value={name} required autofocus />
     </label>
     <div class="row">
       <label class="grow">
-        Host
+        {t("server.host")}
         <input bind:value={host} required />
       </label>
       <label>
-        Port
+        {t("server.port")}
         <input type="number" bind:value={port} min="1" max="65535" />
       </label>
     </div>
     <label>
-      User
+      {t("server.user")}
       <input bind:value={user} required />
     </label>
 
     {#if app.folders.length > 0}
       <label>
-        Ordner
+        {t("server.folder")}
         <select bind:value={folderId}>
-          <option value="">— Ohne Ordner —</option>
+          <option value="">— {t("server.noFolder")} —</option>
           {#each app.folders as f (f.id)}
             <option value={f.id}>{f.name}</option>
           {/each}
@@ -122,21 +123,21 @@
     <JumpHostSelect bind:value={jumpId} excludeId={server.id} />
 
     <div class="color-field">
-      Farbe
+      {t("color.label")}
       <ColorPicker bind:value={color} />
     </div>
 
     <fieldset class="auth">
-      <legend>Auth</legend>
+      <legend>{t("server.auth")}</legend>
       <label class="radio">
         <input type="radio" name="auth" value="password" bind:group={authMode} />
-        <span>Passwort</span>
+        <span>{t("server.authPassword")}</span>
       </label>
       <label class="radio">
         <input type="radio" name="auth" value="key" bind:group={authMode} />
-        <span>Bestehender Key</span>
+        <span>{t("server.authKey")}</span>
       </label>
-      <label class="radio" title="Keys aus dem laufenden ssh-agent (OpenSSH, 1Password, Pageant …)">
+      <label class="radio" title={t("server.authAgentTitle")}>
         <input type="radio" name="auth" value="agent" bind:group={authMode} />
         <span>ssh-agent</span>
       </label>
@@ -144,48 +145,34 @@
 
     {#if authMode === "key"}
       {#if keys.length === 0}
-        <p class="hint warn">
-          Keine Keys in Terminalox vorhanden. Lege erst einen unter
-          <strong>Keys</strong> an.
-        </p>
+        <p class="hint warn">{t("edit.noKeys")}</p>
       {:else}
         <label>
-          Key
+          {t("server.key")}
           <select bind:value={keyId} required>
             {#each keys as k}
               <option value={k.id}>{k.name} ({k.algorithm})</option>
             {/each}
           </select>
         </label>
-        <p class="hint">
-          Der Public Key muss auf dem Server in
-          <code>~/.ssh/authorized_keys</code> liegen, sonst schlägt die
-          Verbindung fehl.
-        </p>
+        <p class="hint">{t("edit.keyHint")}</p>
       {/if}
     {:else if authMode === "agent"}
-      <p class="hint">
-        Login mit den Keys des laufenden ssh-agents (z.B. 1Password, Secretive,
-        <code>ssh-add</code>). terminalox speichert dafür keinen Key.
-      </p>
+      <p class="hint">{t("server.agentHint")}</p>
     {:else if server.hardened}
-      <p class="hint warn">
-        Dieser Server ist gehärtet — Passwort-Login ist serverseitig deaktiviert.
-        Auf Passwort umstellen führt zu Verbindungsfehlern, bis der Server
-        ent-härtet wird.
-      </p>
+      <p class="hint warn">{t("edit.hardenedWarn")}</p>
     {/if}
 
     {#if error}<p class="error">{error}</p>{/if}
 
     <div class="buttons">
-      <button type="button" onclick={onClose}>Abbrechen</button>
+      <button type="button" onclick={onClose}>{t("common.cancel")}</button>
       <button
         type="submit"
         class="primary"
         disabled={submitting || (authMode === "key" && keys.length === 0)}
       >
-        {submitting ? "…" : "Speichern"}
+        {submitting ? "…" : t("common.save")}
       </button>
     </div>
   </form>

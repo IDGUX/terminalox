@@ -3,6 +3,7 @@
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { formatDateTime, t, tn } from "$lib/i18n/index.svelte";
   import type { KeyInfo, Server } from "$lib/types";
   import ImportKeyDialog from "./ImportKeyDialog.svelte";
 
@@ -31,7 +32,7 @@
     try {
       await api.forgetSecret("passphrase", k.id);
       passphraseRemembered = false;
-      toast.success("Passphrase vergessen — sie wird beim nächsten Verbinden erfragt.");
+      toast.success(t("keys.passphraseForgotten"));
     } catch (e) {
       toast.error(String(e));
     }
@@ -54,9 +55,9 @@
   async function copyPublic(k: KeyInfo) {
     try {
       await writeText(k.public_openssh);
-      toast.success(`Public Key von „${k.name}" kopiert`);
+      toast.success(t("keys.publicCopied", { name: k.name }));
     } catch (e) {
-      toast.error(`Konnte nicht kopieren: ${e}`);
+      toast.error(t("keys.copyFailed", { detail: String(e) }));
     }
   }
 
@@ -64,29 +65,29 @@
     if (!k.fingerprint) return;
     try {
       await writeText(k.fingerprint);
-      toast.success("Fingerprint kopiert");
+      toast.success(t("keys.fingerprintCopied"));
     } catch (e) {
-      toast.error(`Konnte nicht kopieren: ${e}`);
+      toast.error(t("keys.copyFailed", { detail: String(e) }));
     }
   }
 
   async function copyPath(path: string, label: string) {
     try {
       await writeText(path);
-      toast.success(`${label}-Pfad kopiert`);
+      toast.success(t("keys.pathCopied", { label }));
     } catch (e) {
-      toast.error(`Konnte nicht kopieren: ${e}`);
+      toast.error(t("keys.copyFailed", { detail: String(e) }));
     }
   }
 
   async function deleteKey(k: KeyInfo) {
     const confirmed = confirm(
-      `Key „${k.name}" löschen?\n\nPrivate + Public Key Datei werden entfernt. Das kann nicht rückgängig gemacht werden.`,
+      t("keys.confirmDelete", { name: k.name }),
     );
     if (!confirmed) return;
     try {
       await app.deleteKey(k.id);
-      toast.success(`Key „${k.name}" gelöscht`);
+      toast.success(t("keys.deleted", { name: k.name }));
       usage = [];
     } catch (e) {
       toast.error(String(e));
@@ -96,7 +97,7 @@
   async function generate(e: Event) {
     e.preventDefault();
     if (generatePassphrase !== generatePassphrase2) {
-      toast.error("Die Passphrasen stimmen nicht überein.");
+      toast.error(t("backup.errMismatch"));
       return;
     }
     generating = true;
@@ -106,7 +107,12 @@
         generatePassphrase || null,
         rememberPassphrase,
       );
-      toast.success(`Key „${k.name}" erzeugt (${k.algorithm}${k.encrypted ? ", mit Passphrase" : ""})`);
+      toast.success(
+        t(k.encrypted ? "keys.generatedEnc" : "keys.generated", {
+          name: k.name,
+          algorithm: k.algorithm,
+        }),
+      );
       generateName = "";
       generatePassphrase = "";
       generatePassphrase2 = "";
@@ -134,20 +140,17 @@
 <div class="keys-view">
   <aside class="list">
     <header>
-      <h2>Keys</h2>
+      <h2>{t("tabs.keys")}</h2>
       <div class="actions">
-        <button onclick={() => (showGenerate = true)} title="Neuen Key generieren">+ Neu</button>
-        <button onclick={() => (showImport = true)} title="Bestehenden Key importieren">↓ Import</button>
+        <button onclick={() => (showGenerate = true)} title={t("keys.generateTitle")}>+ {t("keys.new")}</button>
+        <button onclick={() => (showImport = true)} title={t("keys.importTitle")}>↓ {t("footer.import")}</button>
       </div>
     </header>
 
     {#if app.keys.length === 0}
       <div class="empty">
-        <p>Noch keine Keys.</p>
-        <p class="small">
-          „Neu" erzeugt einen Ed25519-Key, „Import" liest einen bestehenden aus
-          <code>~/.ssh/</code>.
-        </p>
+        <p>{t("keys.empty")}</p>
+        <p class="small">{t("keys.emptyHint")}</p>
       </div>
     {:else}
       <ul>
@@ -161,10 +164,10 @@
               <span class="algo">{k.algorithm}</span>
               <span class="name">{k.name}</span>
               {#if k.origin_imported}
-                <span class="tag imported" title="Importiert">IMP</span>
+                <span class="tag imported" title={t("keys.imported")}>IMP</span>
               {/if}
               {#if k.encrypted}
-                <span class="tag" title="Mit Passphrase geschützt">🔒</span>
+                <span class="tag" title={t("keys.protected")}>🔒</span>
               {/if}
             </div>
             {#if k.fingerprint}
@@ -182,10 +185,10 @@
       <header class="detail-header">
         <div>
           <h1>{k.name}</h1>
-          <p class="algo-line">{k.algorithm.toUpperCase()} · erstellt {new Date(k.created_at).toLocaleString()}</p>
+          <p class="algo-line">{k.algorithm.toUpperCase()} · {t("keys.created", { date: formatDateTime(k.created_at) })}</p>
         </div>
         <button class="primary copy-big" onclick={() => copyPublic(k)}>
-          📋 Public Key kopieren
+          📋 {t("keys.copyPublic")}
         </button>
       </header>
 
@@ -194,7 +197,7 @@
           <div class="card-header">
             <h3>Fingerprint</h3>
             {#if k.fingerprint}
-              <button class="ghost-mini" onclick={() => copyFingerprint(k)}>kopieren</button>
+              <button class="ghost-mini" onclick={() => copyFingerprint(k)}>{t("keys.copy")}</button>
             {/if}
           </div>
           <code class="block">{k.fingerprint ?? "—"}</code>
@@ -204,43 +207,43 @@
           <h3>Public Key (OpenSSH)</h3>
           <textarea readonly class="block multi" rows="3">{k.public_openssh}</textarea>
           <p class="muted">
-            Zum Hochladen bei Hetzner, DigitalOcean, GitHub, GitLab, Cloud-Init etc.
+            {t("keys.publicHint")}
           </p>
         </div>
 
         <div class="card">
-          <h3>Pfade</h3>
+          <h3>{t("keys.paths")}</h3>
           <div class="path-row">
             <span class="label">Private:</span>
             <code>{k.private_path}</code>
-            <button class="ghost-mini" onclick={() => copyPath(k.private_path, 'Private')}>kopieren</button>
+            <button class="ghost-mini" onclick={() => copyPath(k.private_path, 'Private')}>{t("keys.copy")}</button>
           </div>
           <div class="path-row">
             <span class="label">Public:</span>
             <code>{k.public_path}</code>
-            <button class="ghost-mini" onclick={() => copyPath(k.public_path, 'Public')}>kopieren</button>
+            <button class="ghost-mini" onclick={() => copyPath(k.public_path, 'Public')}>{t("keys.copy")}</button>
           </div>
-          <p class="muted">Perms: 0600. Kompatibel mit System-<code>ssh</code>.</p>
+          <p class="muted">{t("keys.perms")}</p>
         </div>
 
         {#if k.encrypted}
           <div class="card">
             <h3>🔒 Passphrase</h3>
             {#if passphraseRemembered}
-              <p class="muted">Im Schlüsselbund des Betriebssystems gespeichert.</p>
-              <button class="ghost-mini" onclick={() => forgetPassphrase(k)}>Vergessen</button>
+              <p class="muted">{t("keys.passphraseStored")}</p>
+              <button class="ghost-mini" onclick={() => forgetPassphrase(k)}>{t("keys.forget")}</button>
             {:else}
               <p class="muted">
-                Wird beim Verbinden abgefragt; im Dialog lässt sie sich im Schlüsselbund merken.
+                {t("keys.passphraseAsked")}
               </p>
             {/if}
           </div>
         {/if}
 
         <div class="card">
-          <h3>Verwendet von {usage.length} Server{usage.length === 1 ? "" : "n"}</h3>
+          <h3>{tn("keys.usedBy", usage.length)}</h3>
           {#if usage.length === 0}
-            <p class="muted">Noch nicht deployed. Geh auf Servers → Key deployen, um ihn zu verwenden.</p>
+            <p class="muted">{t("keys.notDeployed")}</p>
           {:else}
             <ul class="usage-list">
               {#each usage as s (s.id)}
@@ -248,7 +251,7 @@
                   <span class="status-dot" class:hardened={s.hardened}></span>
                   <strong>{s.name}</strong>
                   <span class="muted">{s.user}@{s.host}</span>
-                  {#if s.hardened}<span class="tag hardened">🛡 gehärtet</span>{/if}
+                  {#if s.hardened}<span class="tag hardened">🛡 {t("keys.hardened")}</span>{/if}
                 </li>
               {/each}
             </ul>
@@ -256,29 +259,21 @@
         </div>
 
         <div class="card danger">
-          <h3>Gefahrenzone</h3>
+          <h3>{t("keys.danger")}</h3>
           {#if usage.length > 0}
-            <p class="muted">
-              Dieser Key wird noch von {usage.length} Server{usage.length === 1 ? "" : "n"} benutzt.
-              Lösche erst die Server (oder stelle sie auf Passwort-Auth um), bevor du den Key löschst.
-            </p>
-            <button class="danger-btn" disabled>Key löschen</button>
+            <p class="muted">{tn("keys.stillUsed", usage.length)}</p>
+            <button class="danger-btn" disabled>{t("keys.delete")}</button>
           {:else}
-            <p class="muted">
-              Entfernt Private + Public Key Datei und den Eintrag im Store. Nicht rückgängig.
-            </p>
-            <button class="danger-btn" onclick={() => deleteKey(k)}>Key löschen</button>
+            <p class="muted">{t("keys.deleteHint")}</p>
+            <button class="danger-btn" onclick={() => deleteKey(k)}>{t("keys.delete")}</button>
           {/if}
         </div>
       </div>
     {:else}
       <div class="splash">
-        <h1>Keys</h1>
-        <p>Wähle links einen Key, um Fingerprint, Public Key, Pfade und verwendende Server zu sehen.</p>
-        <p class="small">
-          Tipp: „Public Key kopieren" gibt dir genau den String, den du bei Hetzner,
-          DigitalOcean, GitHub &amp; Co. in deren SSH-Key-Feld pasten kannst.
-        </p>
+        <h1>{t("tabs.keys")}</h1>
+        <p>{t("keys.splash")}</p>
+        <p class="small">{t("keys.splashTip")}</p>
       </div>
     {/if}
   </section>
@@ -291,34 +286,31 @@
 {#if showGenerate}
   <div class="overlay">
     <form class="dialog" onsubmit={generate}>
-      <h3>Neuen Key generieren</h3>
+      <h3>{t("keys.generateTitle")}</h3>
       <label>
-        Name
-        <input bind:value={generateName} placeholder="z.B. personal_mac" required autofocus />
+        {t("server.name")}
+        <input bind:value={generateName} placeholder={t("keys.namePlaceholder")} required autofocus />
       </label>
-      <p class="hint">Algorithmus: Ed25519. Datei: <code>~/.ssh/terminalox_&lt;name&gt;</code></p>
+      <p class="hint">{t("keys.algoHint")}</p>
       <label>
-        Passphrase <em>(optional)</em>
+        {t("secret.passphrase")} <em>({t("keys.optional")})</em>
         <input type="password" bind:value={generatePassphrase} autocomplete="new-password" />
       </label>
       {#if generatePassphrase}
         <label>
-          Passphrase wiederholen
+          {t("backup.passphraseRepeat")}
           <input type="password" bind:value={generatePassphrase2} autocomplete="new-password" />
         </label>
         <label class="check">
           <input type="checkbox" bind:checked={rememberPassphrase} />
-          Im Schlüsselbund des Betriebssystems merken
+          {t("secret.remember")}
         </label>
       {/if}
-      <p class="hint">
-        Mit Passphrase ist die Key-Datei verschlüsselt. Ohne Schlüsselbund fragt
-        terminalox einmal pro App-Start danach.
-      </p>
+      <p class="hint">{t("keys.passphraseHint")}</p>
       <div class="buttons">
-        <button type="button" onclick={() => (showGenerate = false)}>Abbrechen</button>
+        <button type="button" onclick={() => (showGenerate = false)}>{t("common.cancel")}</button>
         <button type="submit" class="primary" disabled={generating}>
-          {generating ? "…" : "Generieren"}
+          {generating ? "…" : t("keys.generate")}
         </button>
       </div>
     </form>

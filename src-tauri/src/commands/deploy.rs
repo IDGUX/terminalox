@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::access::{self, Login};
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
+use crate::msg::Msg;
 use crate::ssh::client::Credential;
 use crate::ssh::harden::{HardenReadiness, PrivilegeMethod};
 use crate::ssh::{deploy, harden};
@@ -22,7 +23,7 @@ pub struct DeployReport {
     pub password_auth_confirmed_disabled: bool,
     pub hardened: bool,
     pub server_auth_switched: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Msg>,
 }
 
 #[tauri::command]
@@ -74,17 +75,20 @@ pub async fn deploy_key(
             s
         }
         Err(e) => {
-            report.warnings.push(format!(
-                "Key-Pre-Flight fehlgeschlagen: {e}. Passwort-Login bleibt aktiv."
+            report.warnings.push(msg!(
+                "deploy_preflight_failed",
+                "Key pre-flight failed, password login stays enabled."
             ));
+            report.warnings.push(e.to_msg());
             return Ok(report);
         }
     };
 
     if !assign_to_server {
-        report.warnings.push(
-            "Key ist deployed. Für die Härtung muss der geprüfte SSH-Key dem Server in terminalox zugewiesen werden.".into(),
-        );
+        report.warnings.push(msg!(
+            "deploy_not_assigned",
+            "Key is deployed. For hardening, the verified SSH key must be assigned to the server in terminalox."
+        ));
         return Ok(report);
     }
 
@@ -110,18 +114,15 @@ pub async fn deploy_key(
             report.password_auth_confirmed_disabled = outcome.password_auth_confirmed_disabled;
             report.hardened = outcome.all_ok();
             if !outcome.all_ok() {
-                let msg = if outcome.stderr.is_empty() {
-                    "Härten fehlgeschlagen (kein Detail vom Server)".to_string()
-                } else {
-                    format!("Härten fehlgeschlagen: {}", outcome.stderr.trim())
-                };
-                report.warnings.push(msg);
+                report.warnings.push(outcome.failure_msg());
             }
         }
         HardenReadiness::Unavailable { reason } => {
-            report.warnings.push(format!(
-                "Key ist deployed, aber Härten wurde übersprungen: {reason}"
+            report.warnings.push(msg!(
+                "deploy_harden_skipped",
+                "Key is deployed, but hardening was skipped:"
             ));
+            report.warnings.push(reason);
         }
     }
 

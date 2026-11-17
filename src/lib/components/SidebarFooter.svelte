@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { t } from "$lib/i18n/index.svelte";
 
   let {
     onExport,
@@ -19,21 +20,21 @@
     onclick={async () => {
       try {
         const p = await app.syncSshConfig();
-        toast.success(`~/.ssh/config geschrieben (${p})`);
+          toast.success(t("footer.configWritten", { path: p }));
       } catch (e) {
         toast.error(String(e));
       }
     }}
-    title="terminalox-Server als verwalteten Block in ~/.ssh/config eintragen"
+    title={t("footer.writeConfigTitle")}
   >
-    ~/.ssh/config schreiben
+    {t("footer.writeConfig")}
   </button>
-  <button class="ghost" onclick={onImportConfig} title="Hosts aus ~/.ssh/config übernehmen">
-    ~/.ssh/config importieren …
+  <button class="ghost" onclick={onImportConfig} title={t("footer.importConfigTitle")}>
+    {t("footer.importConfig")}
   </button>
   <div class="backup-row">
-    <button class="ghost-half" onclick={onExport} title="Backup exportieren">↑ Export</button>
-    <button class="ghost-half" onclick={onImport} title="Backup importieren">↓ Import</button>
+    <button class="ghost-half" onclick={onExport} title={t("footer.exportTitle")}>↑ {t("footer.export")}</button>
+    <button class="ghost-half" onclick={onImport} title={t("footer.importTitle")}>↓ {t("footer.import")}</button>
   </div>
 </footer>
 

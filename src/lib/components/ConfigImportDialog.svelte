@@ -3,6 +3,7 @@
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { t, tm, tn } from "$lib/i18n/index.svelte";
   import type { ConfigImportReport, ImportCandidate } from "$lib/types";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -38,7 +39,7 @@
         .map(([k]) => k);
       report = await api.importSshConfigHosts(aliases);
       await app.refresh();
-      toast.success(`${report.serversAdded} Server importiert`);
+      toast.success(tn("cfgimport.toast", report.serversAdded));
     } catch (e) {
       error = String(e);
     } finally {
@@ -47,9 +48,9 @@
   }
 
   function authLabel(c: ImportCandidate): string {
-    if (c.auth === "key") return "🔑 Key wird übernommen";
+    if (c.auth === "key") return `🔑 ${t("cfgimport.authKey")}`;
     if (c.auth === "agent") return "ssh-agent";
-    return "🔓 Passwort";
+    return `🔓 ${t("server.authPassword")}`;
   }
 </script>
 
@@ -57,25 +58,21 @@
 
 <div class="overlay">
   <div class="dialog" role="dialog" aria-modal="true">
-    <h3>Hosts aus ~/.ssh/config importieren</h3>
+    <h3>{t("cfgimport.title")}</h3>
 
     {#if loading}
-      <p class="muted">Lese ~/.ssh/config …</p>
+      <p class="muted">{t("cfgimport.loading")}</p>
     {:else if report}
       <p>
-        {report.serversAdded} Server angelegt{report.keysImported > 0
-          ? `, ${report.keysImported} Key${report.keysImported === 1 ? "" : "s"} übernommen`
+        {tn("cfgimport.added", report.serversAdded)}{report.keysImported > 0
+          ? ", " + tn("cfgimport.keys", report.keysImported)
           : ""}.
       </p>
-      {#each report.warnings as w}<p class="warn">⚠ {w}</p>{/each}
+      {#each report.warnings as w}<p class="warn">⚠ {w.alias}: {tm(w.msg)}</p>{/each}
     {:else if candidates && candidates.length === 0}
-      <p class="muted">Keine konkreten <code>Host</code>-Einträge gefunden (Wildcards und der terminalox-Block werden übersprungen).</p>
+      <p class="muted">{t("cfgimport.none")}</p>
     {:else if candidates}
-      <p class="muted">
-        Keys aus <code>IdentityFile</code> werden nach <code>~/.ssh/terminalox_imported_*</code>
-        kopiert; die Originale bleiben unangetastet. <code>ProxyJump</code> wird übernommen,
-        wenn der Jump-Host ebenfalls importiert wird oder schon existiert.
-      </p>
+      <p class="muted">{t("cfgimport.intro")}</p>
       <ul class="list">
         {#each candidates as c (c.alias)}
           <li class:disabled={!importable(c)}>
@@ -86,10 +83,10 @@
                 <span class="muted">{c.effectiveUser}@{c.host}{c.port !== 22 ? `:${c.port}` : ""}</span>
               </span>
               <span class="meta">
-                {#if c.problem}<span class="bad">{c.problem}</span>
-                {:else if c.alreadyExists}<span class="muted">existiert bereits</span>
+                {#if c.problem}<span class="bad">{tm(c.problem)}</span>
+                {:else if c.alreadyExists}<span class="muted">{t("cfgimport.exists")}</span>
                 {:else}
-                  {authLabel(c)}{#if c.proxyJump} · via {c.proxyJump}{/if}
+                  {authLabel(c)}{#if c.proxyJump} · {t("cfgimport.via", { jump: c.proxyJump })}{/if}
                 {/if}
               </span>
             </label>
@@ -102,11 +99,11 @@
 
     <div class="buttons">
       {#if report}
-        <button class="primary" onclick={onClose}>Fertig</button>
+        <button class="primary" onclick={onClose}>{t("common.done")}</button>
       {:else}
-        <button onclick={onClose} disabled={importing}>Abbrechen</button>
+        <button onclick={onClose} disabled={importing}>{t("common.cancel")}</button>
         <button class="primary" onclick={runImport} disabled={importing || count === 0}>
-          {importing ? "Importiere …" : `${count} importieren`}
+          {importing ? t("cfgimport.running") : t("cfgimport.submit", { count })}
         </button>
       {/if}
     </div>

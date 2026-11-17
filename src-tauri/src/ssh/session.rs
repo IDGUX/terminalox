@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::access::Login;
 use crate::error::AppResult;
+use crate::msg::Msg;
 use crate::state::SessionHandle;
 
 /// Pending keystrokes/pastes per session; `write_session` waits when full.
@@ -19,7 +20,7 @@ const INPUT_QUEUE: usize = 256;
 pub struct SessionClosedEvent {
     pub session_id: Uuid,
     pub exit_code: Option<u32>,
-    pub error: Option<String>,
+    pub error: Option<Msg>,
 }
 
 /// Frontend channels: raw PTY bytes (ArrayBuffer on the JS side) and one
@@ -66,7 +67,7 @@ pub async fn spawn_session(
     );
 
     tokio::spawn(async move {
-        let mut final_error: Option<String> = None;
+        let mut final_error: Option<Msg> = None;
         let mut exit_code: Option<u32> = None;
 
         loop {
@@ -78,7 +79,7 @@ pub async fn spawn_session(
                 }
                 Some(bytes) = input_rx.recv() => {
                     if let Err(e) = channel.data(bytes.as_slice()).await {
-                        final_error = Some(format!("Senden fehlgeschlagen: {e}"));
+                        final_error = Some(msg!("send_failed", "Sending failed: {detail}", detail = e));
                         break;
                     }
                 }

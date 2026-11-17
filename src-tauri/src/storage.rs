@@ -59,7 +59,7 @@ impl Store {
         }
     }
 
-    /// Server, deren Jump-Host gelöscht wurde, verbinden wieder direkt.
+    /// Servers whose jump host was deleted connect directly again.
     pub fn clear_dangling_jump_refs(&mut self) {
         let ids: Vec<Uuid> = self.servers.iter().map(|s| s.id).collect();
         for s in &mut self.servers {

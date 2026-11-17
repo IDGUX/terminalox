@@ -13,8 +13,8 @@ const BEGIN: &str = "# BEGIN TERMINALOX";
 const END: &str = "# END TERMINALOX";
 
 pub fn config_path() -> AppResult<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AppError::Other("Home-Verzeichnis nicht gefunden".into()))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::Other("home directory not found".into()))?;
     Ok(home.join(".ssh").join("config"))
 }
 

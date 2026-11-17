@@ -117,7 +117,12 @@ fn decrypt(passphrase: &str, envelope: &BackupEnvelope) -> AppResult<BackupPaylo
             let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
             let plaintext = cipher
                 .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
-                .map_err(|_| AppError::Other("falsche Passphrase oder beschädigte Datei".into()))?;
+                .map_err(|_| {
+                    msg!(
+                        "backup_wrong_passphrase",
+                        "Wrong passphrase or damaged file"
+                    )
+                })?;
             Ok(serde_json::from_slice(&plaintext)?)
         }
     }
@@ -193,8 +198,13 @@ pub async fn inspect_backup(
     passphrase: Option<String>,
 ) -> AppResult<InspectReport> {
     let bytes = std::fs::read(&source_path)?;
-    let envelope: BackupEnvelope = serde_json::from_slice(&bytes)
-        .map_err(|e| AppError::Other(format!("Datei ist kein gültiges terminalox-Backup: {e}")))?;
+    let envelope: BackupEnvelope = serde_json::from_slice(&bytes).map_err(|e| {
+        msg!(
+            "backup_invalid_file",
+            "File is not a valid terminalox backup: {detail}",
+            detail = e
+        )
+    })?;
     let encrypted = matches!(envelope, BackupEnvelope::Encrypted { .. });
     let payload = match (&envelope, passphrase.as_deref()) {
         (BackupEnvelope::Plain { payload }, _) => clone_payload(payload),
@@ -214,7 +224,7 @@ pub async fn inspect_backup(
         }
     };
     if payload.magic != MAGIC {
-        return Err(AppError::Other("Nicht unser Backup-Format".into()));
+        return Err(msg!("backup_not_ours", "Not a terminalox backup format").into());
     }
     Ok(InspectReport {
         encrypted,
@@ -245,23 +255,31 @@ pub async fn import_backup(
     state: State<'_, AppState>,
 ) -> AppResult<ImportReport> {
     let bytes = std::fs::read(&opts.source_path)?;
-    let envelope: BackupEnvelope = serde_json::from_slice(&bytes)
-        .map_err(|e| AppError::Other(format!("Datei ist kein gültiges terminalox-Backup: {e}")))?;
+    let envelope: BackupEnvelope = serde_json::from_slice(&bytes).map_err(|e| {
+        msg!(
+            "backup_invalid_file",
+            "File is not a valid terminalox backup: {detail}",
+            detail = e
+        )
+    })?;
     let payload = match (&envelope, opts.passphrase.as_deref()) {
         (BackupEnvelope::Plain { payload }, _) => clone_payload(payload),
         (BackupEnvelope::Encrypted { .. }, Some(pw)) if !pw.is_empty() => decrypt(pw, &envelope)?,
         (BackupEnvelope::Encrypted { .. }, _) => {
-            return Err(AppError::Other("Passphrase erforderlich".into()));
+            return Err(msg!("backup_passphrase_required", "Passphrase required").into());
         }
     };
     if payload.magic != MAGIC {
-        return Err(AppError::Other("Nicht unser Backup-Format".into()));
+        return Err(msg!("backup_not_ours", "Not a terminalox backup format").into());
     }
     if payload.version > EXPORT_VERSION {
-        return Err(AppError::Other(format!(
-            "Backup-Version {} ist neuer als unterstützt ({}). Bitte App aktualisieren.",
-            payload.version, EXPORT_VERSION
-        )));
+        return Err(msg!(
+            "backup_too_new",
+            "Backup version {version} is newer than supported ({supported}). Please update the app.",
+            version = payload.version,
+            supported = EXPORT_VERSION
+        )
+        .into());
     }
 
     // Prepare writes (keys into ~/.ssh/ of *this* platform).
@@ -349,13 +367,17 @@ pub async fn import_backup(
     for mut server in payload.servers {
         // Backups may come from elsewhere: same rules as manual entry.
         if let Err(e) = validate::server(&mut server) {
-            report.servers_invalid.push(format!("{}: {e}", server.name));
+            report.servers_invalid.push(ServerProblem {
+                name: server.name.clone(),
+                msg: e.to_msg(),
+            });
             continue;
         }
         if validate::unique_name(&store, &server.name, Some(server.id)).is_err() {
-            report
-                .servers_invalid
-                .push(format!("{}: Name ist bereits vergeben", server.name));
+            report.servers_invalid.push(ServerProblem {
+                name: server.name.clone(),
+                msg: msg!("backup_name_taken", "Name is already taken"),
+            });
             continue;
         }
         let existing = store.servers.iter().position(|s| s.id == server.id);
@@ -459,5 +481,12 @@ pub struct ImportReport {
     pub keys_skipped: usize,
     pub key_file_conflicts: Vec<String>,
     /// Server entries rejected by validation (name: reason).
-    pub servers_invalid: Vec<String>,
+    pub servers_invalid: Vec<ServerProblem>,
+}
+
+/// A server entry from the backup that was not imported.
+#[derive(Debug, Serialize)]
+pub struct ServerProblem {
+    pub name: String,
+    pub msg: crate::msg::Msg,
 }

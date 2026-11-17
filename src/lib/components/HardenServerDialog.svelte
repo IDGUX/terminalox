@@ -2,6 +2,7 @@
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { errorText, t, tm } from "$lib/i18n/index.svelte";
   import type { HardenReadiness, HardenReport, PrivilegeMethod, Server } from "$lib/types";
 
   let { server, readiness, onClose }: {
@@ -28,13 +29,13 @@
         needsPassword ? sudoPassword : null,
       );
       if (report.hardened) {
-        toast.success(`${server.name} ist jetzt gehärtet`);
+        toast.success(t("harden.toastOk", { name: server.name }));
       } else {
-        toast.error(`Härten unvollständig — siehe Details`);
+        toast.error(t("harden.toastIncomplete"));
       }
       await app.refresh();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       submitting = false;
     }
@@ -45,9 +46,9 @@
   }
 
   function methodLabel(m: PrivilegeMethod): string {
-    if (m === "root") return "Als root eingeloggt — keine Eskalation nötig";
-    if (m === "sudo_nopasswd") return "Passwortloses sudo verfügbar (NOPASSWD)";
-    return "sudo ist verfügbar, aber braucht dein Passwort";
+    if (m === "root") return t("harden.methodRoot");
+    if (m === "sudo_nopasswd") return t("harden.methodNopasswd");
+    return t("harden.methodPassword");
   }
 </script>
 
@@ -59,19 +60,14 @@
 <div class="overlay">
   <form class="dialog" onsubmit={submit}>
     {#if !report}
-      <h3>{server.name} härten</h3>
-      <p class="hint">
-        Deaktiviert die Passwort- und Keyboard-Interactive-Anmeldung. Nach dem Reload
-        prüft terminalox den Schlüssel-Login über eine neue SSH-Verbindung. Fehlt die
-        Bestätigung, versucht der Server nach zwei Minuten, die vorherige SSH-Konfiguration
-        wiederherzustellen.
-      </p>
+      <h3>{t("harden.title", { name: server.name })}</h3>
+      <p class="hint">{t("harden.intro")}</p>
 
       <p class="method">✓ {methodLabel(readiness.method)}</p>
 
       {#if needsPassword}
         <label>
-          sudo-Passwort für {server.user}@{server.host}
+          {t("harden.sudoFor", { target: `${server.user}@${server.host}` })}
           <input
             type="password"
             bind:value={sudoPassword}
@@ -79,56 +75,55 @@
             autofocus
             autocomplete="current-password"
           />
-          <span class="hint">Wird für die Änderung und ihre Bestätigung verwendet.</span>
+          <span class="hint">{t("harden.sudoHint")}</span>
         </label>
       {/if}
 
       {#if error}<p class="error">{error}</p>{/if}
 
       <div class="buttons">
-        <button type="button" onclick={onClose}>Abbrechen</button>
+        <button type="button" onclick={onClose}>{t("common.cancel")}</button>
         <button
           type="submit"
           class="primary"
           disabled={submitting || (needsPassword && !sudoPassword)}
         >
-          {submitting ? "Härte…" : "Härten"}
+          {submitting ? t("harden.running") : t("harden.submit")}
         </button>
       </div>
     {:else}
       <h3>
-        {report.hardened ? "✓ Gehärtet" : "⚠ Härten fehlgeschlagen"} — {server.name}
+        {report.hardened ? `✓ ${t("deploy.hardened")}` : `⚠ ${t("harden.failed")}`} — {server.name}
       </h3>
 
       <ul class="steps">
         <li class:ok={report.keyAuthVerified}>
-          {stepIcon(report.keyAuthVerified)} Key-Auth funktioniert
+          {stepIcon(report.keyAuthVerified)} {t("harden.stepKeyAuth")}
         </li>
         <li class:ok={report.dropinInstalled}>
-          {stepIcon(report.dropinInstalled)} Drop-in <code>00-terminalox.conf</code> geschrieben
+          {stepIcon(report.dropinInstalled)} {t("step.dropinInstalled")}
         </li>
         <li class:ok={report.sshdValidated}>
-          {stepIcon(report.sshdValidated)} <code>sshd -t</code> validiert
+          {stepIcon(report.sshdValidated)} {t("step.sshdValidated")}
         </li>
         <li class:ok={report.sshdReloaded}>
-          {stepIcon(report.sshdReloaded)} <code>sshd</code> reloaded
+          {stepIcon(report.sshdReloaded)} {t("step.sshdReloaded")}
         </li>
         <li class:ok={report.passwordAuthConfirmedDisabled}>
-          {stepIcon(report.passwordAuthConfirmedDisabled)}
-          Neuer Schlüssel-Login bestätigt, beide Passwortverfahren sind deaktiviert
+          {stepIcon(report.passwordAuthConfirmedDisabled)} {t("harden.stepConfirmed")}
         </li>
       </ul>
 
       {#if report.warnings.length > 0}
         <div class="warnings">
           {#each report.warnings as w}
-            <p class="warning">⚠ {w}</p>
+            <p class="warning">⚠ {tm(w)}</p>
           {/each}
         </div>
       {/if}
 
       {#if report.hardened}
-        <p class="success">Die SSH-Härtung wurde bestätigt.</p>
+        <p class="success">{t("harden.success")}</p>
       {/if}
 
       <div class="buttons">

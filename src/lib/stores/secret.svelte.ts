@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SecretRequest } from "../types";
+import { errorText } from "../i18n/index.svelte";
 
 interface Pending {
   request: SecretRequest;
@@ -51,8 +52,7 @@ class SecretPromptStore {
       this.finish(true);
     } catch (e) {
       // Wrong passphrase is detected locally; keep the dialog open.
-      const msg = e && typeof e === "object" && "message" in e ? (e as { message: string }).message : String(e);
-      this.error = msg;
+      this.error = errorText(e);
     } finally {
       this.busy = false;
     }

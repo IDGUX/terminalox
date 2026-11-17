@@ -7,6 +7,7 @@ use crate::access::{self, Login};
 use crate::error::{AppError, AppResult};
 use crate::keygen;
 use crate::models::{AuthMode, NewServerInput, Server, UpdateServerInput};
+use crate::msg::Msg;
 use crate::secrets::SecretKind;
 use crate::ssh::client::Credential;
 use crate::ssh::{harden, revoke};
@@ -134,29 +135,29 @@ pub struct DeleteServerReport {
     pub server_removed: bool,
     pub remote_unharden_attempted: bool,
     pub remote_unharden_succeeded: bool,
-    pub remote_unharden_error: Option<String>,
+    pub remote_unharden_error: Option<Msg>,
     pub remote_cleanup_attempted: bool,
     pub remote_cleanup_succeeded: bool,
-    pub remote_cleanup_error: Option<String>,
+    pub remote_cleanup_error: Option<Msg>,
     pub local_key_removed: bool,
-    pub local_key_error: Option<String>,
+    pub local_key_error: Option<Msg>,
     pub key_still_referenced: bool,
     /// Key-only cleanup leaves the terminalox hardening on the server.
     pub hardening_kept: bool,
     /// Revocation failed after unhardening and the hardening was re-applied.
     pub hardening_restored: bool,
-    pub hardening_restore_error: Option<String>,
+    pub hardening_restore_error: Option<Msg>,
 }
 
-async fn restore_hardening(key_login: &Login, sudo_password: Option<&str>) -> Result<(), String> {
-    let session = key_login.connect().await.map_err(|e| e.to_string())?;
+async fn restore_hardening(key_login: &Login, sudo_password: Option<&str>) -> Result<(), Msg> {
+    let session = key_login.connect().await.map_err(|e| e.to_msg())?;
     let outcome = harden::harden(session, key_login, sudo_password)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_msg())?;
     if outcome.all_ok() {
         Ok(())
     } else {
-        Err(outcome.stderr)
+        Err(outcome.failure_msg())
     }
 }
 
@@ -192,11 +193,13 @@ pub async fn delete_server_full(
         (server, key, dependents)
     };
     if !dependents.is_empty() && !opts.force {
-        return Err(AppError::Invalid(format!(
-            "„{}“ ist Jump-Host für: {}. Diese Server zuerst umstellen.",
-            server.name,
-            dependents.join(", ")
-        )));
+        return Err(msg!(
+            "server_is_jump_host",
+            "\"{name}\" is the jump host for: {servers}. Change these servers first.",
+            name = server.name,
+            servers = dependents.join(", ")
+        )
+        .into());
     }
 
     let mut report = DeleteServerReport::default();
@@ -227,17 +230,16 @@ pub async fn delete_server_full(
                             return Err(e)
                         }
                         Err(e) => {
-                            report.remote_cleanup_error = Some(e.to_string());
+                            report.remote_cleanup_error = Some(e.to_msg());
                             return Ok(report);
                         }
                     }
                 }
                 None => {
-                    report.remote_cleanup_error = Some(
-                        "Vor dem Entfernen des SSH-Keys wird ein funktionierender Passwort-Login \
-                         oder ein anderer SSH-Key auf dem Server benötigt."
-                            .into(),
-                    );
+                    report.remote_cleanup_error = Some(msg!(
+                        "revoke_needs_fallback",
+                        "Removing the SSH key requires a working password login or another SSH key on the server."
+                    ));
                     return Ok(report);
                 }
                 Some(password) => {
@@ -260,7 +262,7 @@ pub async fn delete_server_full(
                                 return Err(e)
                             }
                             Err(e) => {
-                                report.remote_unharden_error = Some(e.to_string());
+                                report.remote_unharden_error = Some(e.to_msg());
                                 return Ok(report);
                             }
                         }
@@ -293,7 +295,7 @@ pub async fn delete_server_full(
                                 AppError::SecretRequired(_) => AppError::AuthFailed,
                                 other => other,
                             };
-                            report.remote_cleanup_error = Some(e.to_string());
+                            report.remote_cleanup_error = Some(e.to_msg());
                             return Ok(report);
                         }
                     }
@@ -324,7 +326,7 @@ pub async fn delete_server_full(
             || (!opts.cleanup_remote && !opts.force && opts.delete_unused_local_key);
         if !still_referenced && remove_local_key {
             if let Err(e) = keygen::delete_key_files(&key) {
-                report.local_key_error = Some(e.to_string());
+                report.local_key_error = Some(e.to_msg());
             } else {
                 store.keys.retain(|k| k.id != key.id);
                 state.secrets.forget(SecretKind::KeyPassphrase, key.id);

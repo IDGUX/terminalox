@@ -11,8 +11,8 @@ use crate::fsutil;
 use crate::models::KeyInfo;
 
 pub fn ssh_dir() -> AppResult<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AppError::Other("Home-Verzeichnis nicht gefunden".into()))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::Other("home directory not found".into()))?;
     let dir = home.join(".ssh");
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -44,40 +44,42 @@ fn sanitize(name: &str) -> String {
 pub fn generate_ed25519(name: &str, passphrase: Option<&str>) -> AppResult<KeyInfo> {
     let safe = sanitize(name);
     if safe.is_empty() {
-        return Err(AppError::Invalid("Key-Name darf nicht leer sein".into()));
+        return Err(msg!("key_name_empty", "Key name must not be empty").into());
     }
     let dir = ssh_dir()?;
     let private_path = dir.join(format!("terminalox_{safe}"));
     let public_path = dir.join(format!("terminalox_{safe}.pub"));
     if private_path.exists() || public_path.exists() {
-        return Err(AppError::Invalid(format!(
-            "Key-Datei existiert bereits: {}",
-            private_path.display()
-        )));
+        return Err(msg!(
+            "key_exists",
+            "Key file already exists: {path}",
+            path = private_path.display()
+        )
+        .into());
     }
 
     let mut rng = UnwrapErr(SysRng);
     let mut key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
-        .map_err(|e| AppError::Other(format!("Key-Erzeugung fehlgeschlagen: {e}")))?;
+        .map_err(|e| AppError::Other(format!("key generation failed: {e}")))?;
     let comment = format!("terminalox:{safe}");
     key.set_comment(comment.as_str());
 
     let public_openssh = key
         .public_key()
         .to_openssh()
-        .map_err(|e| AppError::Other(format!("Public Key kodieren: {e}")))?;
+        .map_err(|e| AppError::Other(format!("encoding public key: {e}")))?;
     let fingerprint = fingerprint_of(key.public_key());
 
     let passphrase = passphrase.filter(|p| !p.is_empty());
     let stored = match passphrase {
         Some(p) => key
             .encrypt(&mut rng, p)
-            .map_err(|e| AppError::Other(format!("Key verschlüsseln: {e}")))?,
+            .map_err(|e| AppError::Other(format!("encrypting key: {e}")))?,
         None => key,
     };
     let private_pem = stored
         .to_openssh(LineEnding::LF)
-        .map_err(|e| AppError::Other(format!("Private Key kodieren: {e}")))?;
+        .map_err(|e| AppError::Other(format!("encoding private key: {e}")))?;
 
     write_key_pair(
         &private_path,
@@ -113,24 +115,31 @@ pub fn fingerprint_of(pubkey: &PublicKey) -> String {
 pub fn import_from_file(src_private_path: &Path, desired_name: &str) -> AppResult<KeyInfo> {
     let safe = sanitize(desired_name);
     if safe.is_empty() {
-        return Err(AppError::Invalid("Name darf nicht leer sein".into()));
+        return Err(msg!("key_name_empty", "Key name must not be empty").into());
     }
     if !src_private_path.exists() {
-        return Err(AppError::Invalid(format!(
-            "Datei nicht gefunden: {}",
-            src_private_path.display()
-        )));
+        return Err(msg!(
+            "file_not_found",
+            "File not found: {path}",
+            path = src_private_path.display()
+        )
+        .into());
     }
 
     let bytes = std::fs::read(src_private_path)?;
-    let content = std::str::from_utf8(&bytes)
-        .map_err(|_| AppError::Invalid("Private Key ist nicht im OpenSSH-Textformat".into()))?;
+    let content = std::str::from_utf8(&bytes).map_err(|_| {
+        msg!(
+            "key_not_openssh",
+            "Private key is not in OpenSSH text format"
+        )
+    })?;
 
     let key = PrivateKey::from_openssh(content).map_err(|e| {
-        AppError::Invalid(format!(
-            "Kein gültiger OpenSSH-Private-Key ({e}). Ältere PEM-Keys lassen sich mit \
-             `ssh-keygen -p -f <datei>` ins OpenSSH-Format umwandeln."
-        ))
+        msg!(
+            "key_invalid",
+            "Not a valid OpenSSH private key ({detail}). Older PEM keys can be converted with `ssh-keygen -p -f <file>`.",
+            detail = e
+        )
     })?;
     let encrypted = key.is_encrypted();
 
@@ -145,23 +154,25 @@ pub fn import_from_file(src_private_path: &Path, desired_name: &str) -> AppResul
     let private_path = dir.join(format!("terminalox_imported_{safe}"));
     let public_path = dir.join(format!("terminalox_imported_{safe}.pub"));
     if private_path.exists() || public_path.exists() {
-        return Err(AppError::Invalid(format!(
-            "Ein importierter Key mit diesem Namen existiert bereits: {}",
-            private_path.display()
-        )));
+        return Err(msg!(
+            "key_exists",
+            "Key file already exists: {path}",
+            path = private_path.display()
+        )
+        .into());
     }
 
     let private_pem = if encrypted {
         content.to_string()
     } else {
         key.to_openssh(LineEnding::LF)
-            .map_err(|e| AppError::Other(format!("Private Key kodieren: {e}")))?
+            .map_err(|e| AppError::Other(format!("encoding private key: {e}")))?
             .to_string()
     };
     let public_openssh = key
         .public_key()
         .to_openssh()
-        .map_err(|e| AppError::Other(format!("Public Key kodieren: {e}")))?;
+        .map_err(|e| AppError::Other(format!("encoding public key: {e}")))?;
     let fingerprint = fingerprint_of(key.public_key());
 
     write_key_pair(
