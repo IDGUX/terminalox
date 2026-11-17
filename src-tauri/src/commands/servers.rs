@@ -83,6 +83,9 @@ pub struct DeleteServerOptions {
     /// Attempt to remove the deployed public key from the remote host's authorized_keys.
     #[serde(default)]
     pub cleanup_remote: bool,
+    /// On local-only deletion, also delete the assigned key if no server references it.
+    #[serde(default)]
+    pub delete_unused_local_key: bool,
     /// Password used to verify fallback access before revoking a key.
     #[serde(default)]
     pub password: Option<String>,
@@ -106,6 +109,7 @@ pub struct DeleteServerReport {
     pub remote_cleanup_succeeded: bool,
     pub remote_cleanup_error: Option<String>,
     pub local_key_removed: bool,
+    pub local_key_error: Option<String>,
     pub key_still_referenced: bool,
 }
 
@@ -191,25 +195,27 @@ pub async fn delete_server_full(
 
     // Local delete.
     let mut store = state.store.write().await;
-
-    let before = store.servers.len();
+    let current_server = store.find_server(opts.id).ok_or(AppError::UnknownServer)?;
+    let current_key = assigned_key.and_then(|key| match &current_server.auth {
+        AuthMode::Key { key_id } if *key_id == key.id => store.find_key(*key_id).cloned(),
+        _ => None,
+    });
     store.servers.retain(|s| s.id != opts.id);
-    if store.servers.len() == before {
-        return Err(AppError::UnknownServer);
-    }
     report.server_removed = true;
 
-    if let Some(key) = assigned_key {
+    if let Some(key) = current_key {
         let still_referenced = store
             .servers
             .iter()
             .any(|s| matches!(&s.auth, AuthMode::Key { key_id } if *key_id == key.id));
         report.key_still_referenced = still_referenced;
-        if !still_referenced && report.remote_cleanup_succeeded {
-            store.keys.retain(|k| k.id != key.id);
+        let remove_local_key = report.remote_cleanup_succeeded
+            || (!opts.cleanup_remote && !opts.force && opts.delete_unused_local_key);
+        if !still_referenced && remove_local_key {
             if let Err(e) = keygen::delete_key_files(&key) {
-                tracing::warn!("failed to delete key files: {e}");
+                report.local_key_error = Some(e.to_string());
             } else {
+                store.keys.retain(|k| k.id != key.id);
                 report.local_key_removed = true;
             }
         }
