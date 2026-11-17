@@ -1,4 +1,7 @@
+import type { Msg } from "./i18n/index.svelte";
+
 export type Uuid = string;
+export type { Msg };
 
 export type AuthMode =
   | { mode: "password" }
@@ -37,7 +40,7 @@ export interface DeployReport {
   passwordAuthConfirmedDisabled: boolean;
   hardened: boolean;
   serverAuthSwitched: boolean;
-  warnings: string[];
+  warnings: Msg[];
 }
 
 export interface HardenReport {
@@ -47,7 +50,7 @@ export interface HardenReport {
   sshdReloaded: boolean;
   passwordAuthConfirmedDisabled: boolean;
   hardened: boolean;
-  warnings: string[];
+  warnings: Msg[];
 }
 
 export interface VerifyHardenReport {
@@ -57,7 +60,7 @@ export interface VerifyHardenReport {
    *  false = effektive Konfig erlaubt Passwort-Login (Drift!).
    *  null = effektiver Check konnte nicht laufen (kein sudo). */
   effectivePasswordAuthOff: boolean | null;
-  effectiveCheckError: string | null;
+  effectiveCheckError: Msg | null;
   isHardened: boolean;
   stateChanged: boolean;
   previousState: boolean;
@@ -67,7 +70,7 @@ export type PrivilegeMethod = "root" | "sudo_nopasswd" | "sudo_with_password";
 
 export type HardenReadiness =
   | { status: "ready"; method: PrivilegeMethod }
-  | { status: "unavailable"; reason: string };
+  | { status: "unavailable"; reason: Msg };
 
 export interface NewServerInput {
   name: string;
@@ -123,7 +126,7 @@ export interface RotateReport {
   oldKeyRevoked: boolean;
   oldKeyRemovedLocally: boolean;
   oldKeyStillUsedBy: string[];
-  warnings: string[];
+  warnings: Msg[];
 }
 
 export interface ImportCandidate {
@@ -135,18 +138,18 @@ export interface ImportCandidate {
   proxyJump?: string | null;
   effectiveUser: string;
   alreadyExists: boolean;
-  problem?: string | null;
+  problem?: Msg | null;
   auth: "key" | "agent" | "password";
 }
 
 export interface ConfigImportReport {
   serversAdded: number;
   keysImported: number;
-  warnings: string[];
+  warnings: { alias: string; msg: Msg }[];
 }
 
 export interface SessionClosedEvent {
   sessionId: Uuid;
   exitCode?: number | null;
-  error?: string | null;
+  error?: Msg | null;
 }

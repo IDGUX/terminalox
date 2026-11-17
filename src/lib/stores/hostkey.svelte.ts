@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { HostKeyRejection } from "../types";
+import { errorText } from "../i18n/index.svelte";
 
 interface Pending {
   rejection: HostKeyRejection;
@@ -49,7 +50,7 @@ class HostKeyPromptStore {
       });
       this.finish(true);
     } catch (e) {
-      this.error = String(e);
+      this.error = errorText(e);
     } finally {
       this.busy = false;
     }

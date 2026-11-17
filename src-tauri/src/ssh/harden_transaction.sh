@@ -137,15 +137,15 @@ check_auth() {
 }
 
 exec 9>"$lock"
-flock -n 9 || fail 'Eine andere SSH-Konfigurationsänderung läuft bereits.'
+flock -n 9 || fail 'Another SSH configuration change is already running.'
 
 case "$action" in
     apply)
-        [[ ! -e "$state" ]] || fail 'Eine SSH-Härtung oder Wiederherstellung läuft bereits.'
+        [[ ! -e "$state" ]] || fail 'An SSH hardening or restore is already running.'
         service=$(detect_service) ||
             fail 'Kein laufender, neu ladbarer SSH-Dienst gefunden (systemd, OpenRC oder service).'
         [[ -f "$config" && ! -L "$config" && ! -L "$dropin" ]] ||
-            fail 'Symbolische Links in der SSH-Konfiguration werden für die Härtung nicht unterstützt.'
+            fail 'Symbolic links in the SSH configuration are not supported for hardening.'
         [[ ! -e "$dropin" || -f "$dropin" ]] || fail 'Der SSH-Drop-in-Pfad ist keine normale Datei.'
         sshd -t -f "$config"
 
@@ -154,7 +154,7 @@ case "$action" in
             timer_kind=systemd
         fi
         if [[ $timer_kind == detached ]]; then
-            command -v setsid >/dev/null || fail 'Für den SSH-Rollback ist systemd-run oder setsid erforderlich.'
+            command -v setsid >/dev/null || fail 'The SSH rollback requires systemd-run or setsid.'
         fi
 
         staged=$(mktemp -d /etc/ssh/.terminalox-stage.XXXXXXXX)
@@ -170,7 +170,7 @@ case "$action" in
                     cancel_timer "$timer_kind" "$timer_id"
                     printf '%s\n' 'STEP:rolled_back'
                 else
-                    printf '%s\n' 'Sofortiger Rollback fehlgeschlagen, der Rollback-Timer bleibt aktiv.' >&2
+                    printf '%s\n' 'Immediate rollback failed; the rollback timer stays active.' >&2
                 fi
             fi
             if [[ -n $staged ]]; then rm -rf -- "$staged"; fi
@@ -226,7 +226,7 @@ while [[ -f "$1/rollback.sh" ]] && ! /bin/bash "$1/rollback.sh" "$2"; do sleep 1
         replace_file "$state/dropin.new" "$dropin"
         printf '%s\n' 'STEP:dropin_installed'
         sshd -t -f "$config"
-        check_auth || fail 'Die beiden Passwortverfahren sind für diese Verbindung nicht nachweislich deaktiviert.'
+        check_auth || fail 'Both password methods are not provably disabled for this connection.'
         printf '%s\n' 'STEP:sshd_validated'
         reload_sshd ${service}
         printf '%s\n' 'STEP:sshd_reloaded'
@@ -235,9 +235,9 @@ while [[ -f "$1/rollback.sh" ]] && ! /bin/bash "$1/rollback.sh" "$2"; do sleep 1
         ;;
     confirm)
         [[ -f "$state/token" && $(cat "$state/token") == "$token" ]] ||
-            fail 'Die SSH-Härtung ist nicht mehr offen. Der Rollback wurde möglicherweise bereits ausgeführt.'
-        cmp -s "$state/dropin.new" "$dropin" || fail 'SSH-Drop-in wurde während der Prüfung geändert.'
-        check_auth || fail 'Die beiden Passwortverfahren sind für die neue Verbindung nicht nachweislich deaktiviert.'
+            fail 'The SSH hardening is no longer pending. The rollback may already have run.'
+        cmp -s "$state/dropin.new" "$dropin" || fail 'The SSH drop-in was changed during verification.'
+        check_auth || fail 'Both password methods are not provably disabled for the new connection.'
         timer_kind=systemd timer_id=$timer
         if [[ -f "$state/timer" ]]; then read -r timer_kind timer_id < "$state/timer"; fi
         retire_state
@@ -245,7 +245,7 @@ while [[ -f "$1/rollback.sh" ]] && ! /bin/bash "$1/rollback.sh" "$2"; do sleep 1
         printf '%s\n' 'STEP:password_auth_off'
         ;;
     verify)
-        [[ ! -e "$state" ]] || fail 'Eine SSH-Härtung oder Wiederherstellung läuft bereits.'
+        [[ ! -e "$state" ]] || fail 'An SSH hardening or restore is already running.'
         if check_auth; then
             printf '%s\n' 'EFFECTIVE:off'
         elif [[ $? == 1 ]]; then
@@ -255,7 +255,7 @@ while [[ -f "$1/rollback.sh" ]] && ! /bin/bash "$1/rollback.sh" "$2"; do sleep 1
         fi
         ;;
     unharden)
-        [[ ! -e "$state" ]] || fail 'Eine SSH-Härtung oder Wiederherstellung läuft bereits.'
+        [[ ! -e "$state" ]] || fail 'An SSH hardening or restore is already running.'
         rm -f -- "$dropin" /etc/ssh/sshd_config.d/99-terminalox.conf
         if grep -qx '# BEGIN_TERMINALOX_INCLUDE' "$config"; then
             staged=$(mktemp -d /etc/ssh/.terminalox-stage.XXXXXXXX)
@@ -279,6 +279,6 @@ while [[ -f "$1/rollback.sh" ]] && ! /bin/bash "$1/rollback.sh" "$2"; do sleep 1
         fail 'STEP:reload_failed'
         ;;
     *)
-        fail 'Unbekannte SSH-Härtungsaktion.'
+        fail 'Unknown SSH hardening action.'
         ;;
 esac

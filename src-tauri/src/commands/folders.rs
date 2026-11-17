@@ -10,16 +10,19 @@ use crate::storage::Store;
 fn validate_name(store: &Store, name: &str, except: Option<Uuid>) -> AppResult<String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(AppError::Other("Ordnername darf nicht leer sein".into()));
+        return Err(msg!("folder_name_empty", "Folder name must not be empty").into());
     }
     let taken = store
         .folders
         .iter()
         .any(|f| Some(f.id) != except && f.name.to_lowercase() == name.to_lowercase());
     if taken {
-        return Err(AppError::Other(format!(
-            "Ordner „{name}\" existiert bereits"
-        )));
+        return Err(msg!(
+            "folder_exists",
+            "Folder \"{name}\" already exists",
+            name = name
+        )
+        .into());
     }
     Ok(name.to_string())
 }

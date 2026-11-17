@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
+  import { errorText, t, tm } from "$lib/i18n/index.svelte";
   import type { DeployReport, Server } from "$lib/types";
 
   let { server, onClose }: { server: Server; onClose: () => void } = $props();
@@ -38,7 +39,7 @@
       );
       await app.refresh();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       submitting = false;
     }
@@ -57,20 +58,13 @@
 <div class="overlay">
   <form class="dialog" onsubmit={submit}>
     {#if !report}
-      <h3>SSH-Key auf {server.name} deployen &amp; härten</h3>
-      <p class="hint">
-        Die App erzeugt einen Key (oder nutzt einen vorhandenen), trägt den Public Key
-        in <code>~/.ssh/authorized_keys</code> ein und verifiziert Key-Auth.
-        Danach wird <strong>Passwort-Login deaktiviert</strong> —
-        <em>sofern</em> der User dafür root ist oder passwortloses sudo hat. Sonst wird das
-        Härten übersprungen (mit Hinweis) und du kannst es später über „Server härten"
-        nachholen. Dein Passwort wird einmalig für SSH benutzt und nicht gespeichert.
-      </p>
+      <h3>{t("deploy.title", { name: server.name })}</h3>
+      <p class="hint">{t("deploy.intro")}</p>
 
       <label>
-        Key wählen
+        {t("deploy.chooseKey")}
         <select bind:value={keyChoice}>
-          <option value="new">-- Neuen Key erzeugen --</option>
+          <option value="new">-- {t("deploy.newKey")} --</option>
           {#each app.keys as k (k.id)}
             <option value={k.id}>{k.name} ({k.algorithm})</option>
           {/each}
@@ -79,91 +73,81 @@
 
       {#if keyChoice === "new"}
         <label>
-          Name für neuen Key
+          {t("deploy.newKeyName")}
           <input bind:value={newKeyName} required />
         </label>
       {/if}
 
       <label>
-        Passwort (einmalig, für Key-Upload und — falls nötig — sudo)
+        {t("deploy.password")}
         <input type="password" bind:value={password} required autofocus />
-        <span class="hint">
-          Auf Debian/Ubuntu ist das SSH-Passwort meist auch das sudo-Passwort. Wird für
-          beides wiederverwendet, falls Härten sudo braucht.
-        </span>
+        <span class="hint">{t("deploy.passwordHint")}</span>
       </label>
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={sudoDiffers} />
-        sudo-Passwort weicht ab
+        {t("deploy.sudoDiffers")}
       </label>
 
       {#if sudoDiffers}
         <label>
-          sudo-Passwort
+          {t("deploy.sudoPassword")}
           <input type="password" bind:value={sudoPassword} />
         </label>
       {/if}
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={assignToServer} />
-        Diesen Server ab jetzt mit Key-Auth verbinden
+        {t("deploy.assign")}
       </label>
 
       {#if error}<p class="error">{error}</p>{/if}
 
       <div class="buttons">
-        <button type="button" onclick={onClose}>Abbrechen</button>
+        <button type="button" onclick={onClose}>{t("common.cancel")}</button>
         <button type="submit" class="primary" disabled={submitting}>
-          {submitting ? "Deploye &amp; härte…" : "Deployen + Härten"}
+          {submitting ? t("deploy.running") : t("deploy.submit")}
         </button>
       </div>
     {:else}
       <h3>
-        {report.hardened ? "✓ Gehärtet" : "⚠ Teilweise geklappt"} —
+        {report.hardened ? `✓ ${t("deploy.hardened")}` : `⚠ ${t("deploy.partial")}`} —
         {server.name}
       </h3>
 
       <ul class="steps">
         <li class:ok={report.keyDeployed}>
-          {stepIcon(report.keyDeployed)} Public Key in <code>authorized_keys</code> eingetragen
+          {stepIcon(report.keyDeployed)} {t("step.keyDeployed")}
         </li>
         <li class:ok={report.keyAuthVerified}>
-          {stepIcon(report.keyAuthVerified)} Key-Auth funktioniert (Pre-Flight mit frischer Session)
+          {stepIcon(report.keyAuthVerified)} {t("step.keyAuthVerified")}
         </li>
         <li class:ok={report.dropinInstalled}>
-          {stepIcon(report.dropinInstalled)} Drop-in <code>00-terminalox.conf</code> geschrieben
+          {stepIcon(report.dropinInstalled)} {t("step.dropinInstalled")}
         </li>
         <li class:ok={report.sshdValidated}>
-          {stepIcon(report.sshdValidated)} <code>sshd -t</code> validiert
+          {stepIcon(report.sshdValidated)} {t("step.sshdValidated")}
         </li>
         <li class:ok={report.sshdReloaded}>
-          {stepIcon(report.sshdReloaded)} <code>sshd</code> reloaded
+          {stepIcon(report.sshdReloaded)} {t("step.sshdReloaded")}
         </li>
         <li class:ok={report.passwordAuthConfirmedDisabled}>
-          {stepIcon(report.passwordAuthConfirmedDisabled)}
-          <code>sshd -T</code> bestätigt Passwort-Login ist aus
+          {stepIcon(report.passwordAuthConfirmedDisabled)} {t("step.passwordOff")}
         </li>
       </ul>
 
       {#if report.warnings.length > 0}
         <div class="warnings">
           {#each report.warnings as w}
-            <p class="warning">⚠ {w}</p>
+            <p class="warning">⚠ {tm(w)}</p>
           {/each}
         </div>
       {/if}
 
       {#if report.hardened}
-        <p class="success">
-          Neuer Schlüssel-Login bestätigt. Beide Passwortverfahren sind für diese Verbindung deaktiviert.
-          Beim Löschen in der App wird das automatisch zurückgesetzt.
-        </p>
+        <p class="success">{t("deploy.successBody")}</p>
       {:else if report.keyDeployed}
-        <p class="warning-box">
-          Der Key ist drauf und kann verwendet werden, aber Passwort-Login ist noch aktiv.
-          Schau in die Warnings und versuche es ggf. erneut.
-        </p>
+        <p class="warning-box">{t("deploy.partialBody")}</p>
       {/if}
 
       <div class="buttons">

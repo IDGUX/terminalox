@@ -3,6 +3,7 @@
   import { toast } from "$lib/stores/toast.svelte";
   import { isAppShortcut, shortcutLabel } from "$lib/shortcuts";
   import type { Folder, HardenReadiness, Server, Uuid } from "$lib/types";
+  import { relativeTime, t, tn } from "$lib/i18n/index.svelte";
   import ServerActions from "./ServerActions.svelte";
   import SidebarFooter from "./SidebarFooter.svelte";
 
@@ -111,14 +112,8 @@
   );
 
   function lastUsedLabel(s: Server): string {
-    if (!s.last_used_at) return "Noch nie verbunden";
-    const min = Math.round((Date.now() - Date.parse(s.last_used_at)) / 60000);
-    if (min < 1) return "Zuletzt verbunden: gerade eben";
-    if (min < 60) return `Zuletzt verbunden: vor ${min} Min.`;
-    const h = Math.round(min / 60);
-    if (h < 24) return `Zuletzt verbunden: vor ${h} Std.`;
-    const d = Math.round(h / 24);
-    return `Zuletzt verbunden: vor ${d} ${d === 1 ? "Tag" : "Tagen"}`;
+    if (!s.last_used_at) return t("sidebar.neverConnected");
+    return t("sidebar.lastConnected", { when: relativeTime(s.last_used_at) });
   }
 
   function onGlobalKeydown(e: KeyboardEvent) {
@@ -185,14 +180,14 @@
     if (
       n > 0 &&
       !confirm(
-        `Ordner „${f.name}" löschen?\n\nDie ${n} Server darin werden NICHT gelöscht, sondern nach „Ohne Ordner" verschoben.`,
+        tn("sidebar.confirmDeleteFolder", n, { name: f.name }),
       )
     ) {
       return;
     }
     try {
       await app.deleteFolder(f.id);
-      toast.success(`Ordner „${f.name}" gelöscht`);
+      toast.success(t("sidebar.folderDeleted", { name: f.name }));
     } catch (e) {
       toast.error(String(e));
     }
@@ -255,16 +250,15 @@
 
   function authState(s: Server): AuthState {
     if (s.hardened) return "hardened";
-    if (s.auth.mode === "key") return "key-unhardened";
+    if (s.auth.mode !== "password") return "key-unhardened";
     return "password";
   }
 
   function authTitle(s: Server): string {
     const st = authState(s);
-    if (st === "hardened") return "Gehärtet: nur Key-Login möglich, Passwort-Login aus";
-    if (st === "key-unhardened")
-      return 'Key-Auth aktiv — aber Passwort-Login ist auf dem Server NOCH möglich. „Server härten" empfohlen.';
-    return "Passwort-Auth";
+    if (st === "hardened") return t("sidebar.authHardened");
+    if (st === "key-unhardened") return t("sidebar.authKeyUnhardened");
+    return t("sidebar.authPassword");
   }
 
 </script>
@@ -278,9 +272,9 @@
       <button
         class="add"
         onclick={() => (newFolderName = "")}
-        title="Neuer Ordner"
-        aria-label="Neuer Ordner">📁</button>
-      <button class="add" onclick={() => onAdd()} title="Neuer Server">+</button>
+        title={t("sidebar.newFolder")}
+        aria-label={t("sidebar.newFolder")}>📁</button>
+      <button class="add" onclick={() => onAdd()} title={t("add.title")}>+</button>
     </div>
   </header>
 
@@ -288,8 +282,8 @@
     <div class="search">
       <input
         type="search"
-        placeholder={`Suchen …  (${shortcutLabel("p")})`}
-        aria-label="Server suchen"
+        placeholder={t("sidebar.searchPlaceholder", { shortcut: shortcutLabel("p") })}
+        aria-label={t("sidebar.searchAria")}
         bind:value={query}
         bind:this={searchInput}
         onkeydown={onSearchKeydown}
@@ -328,7 +322,7 @@
         <span class="chevron">📁</span>
         <input
           class="folder-input"
-          placeholder="Ordnername, z.B. Hetzner"
+          placeholder={t("sidebar.folderPlaceholder")}
           bind:value={newFolderName}
           use:focusSelect
           onkeydown={(e) => {
@@ -341,12 +335,12 @@
     {/if}
 
     {#if app.servers.length === 0 && app.folders.length === 0}
-      <p class="empty">Noch keine Server. Klick auf <strong>+</strong>.</p>
+      <p class="empty">{t("sidebar.empty")}</p>
     {/if}
 
     {#if showRecent}
       {@const open = !collapsed[RECENT_KEY]}
-      <section class="folder recent" aria-label="Zuletzt verwendet">
+      <section class="folder recent" aria-label={t("sidebar.recent")}>
         <div
           class="folder-head"
           role="button"
@@ -356,7 +350,7 @@
           onkeydown={(e) => e.key === "Enter" && toggleFolder(RECENT_KEY)}
         >
           <span class="chevron">{open ? "▾" : "▸"}</span>
-          <span class="folder-name">Zuletzt verwendet</span>
+          <span class="folder-name">{t("sidebar.recent")}</span>
         </div>
         {#if open}
           <ul class="servers nested">
@@ -369,7 +363,7 @@
     {/if}
 
     {#if q && visibleServers.length === 0}
-      <p class="empty">Keine Treffer für „{query.trim()}".</p>
+      <p class="empty">{t("sidebar.noMatches", { query: query.trim() })}</p>
     {/if}
 
     {#each sortedFolders as f (f.id)}
@@ -379,7 +373,7 @@
       <section
         class="folder"
         class:drop={dropTarget === f.id}
-        aria-label="Ordner {f.name}"
+        aria-label={t("sidebar.folderAria", { name: f.name })}
         ondragover={(e) => onDragOver(e, f.id)}
         ondragleave={(e) => onDragLeave(e, f.id)}
         ondrop={(e) => onDrop(e, f.id)}
@@ -413,14 +407,14 @@
             <span class="count">{list.length}</span>
             <span class="folder-actions">
               <button
-                title={`Server in „${f.name}“ hinzufügen`}
+                title={t("sidebar.addToFolder", { name: f.name })}
                 onclick={(e) => { e.stopPropagation(); onAdd(f.id); }}>+</button>
               <button
-                title="Umbenennen"
+                title={t("sidebar.rename")}
                 onclick={(e) => { e.stopPropagation(); startRename(f); }}>✎</button>
               <button
                 class="del"
-                title="Ordner löschen (Server bleiben erhalten)"
+                title={t("sidebar.deleteFolder")}
                 onclick={(e) => { e.stopPropagation(); removeFolder(f); }}>✕</button>
             </span>
           {/if}
@@ -430,7 +424,7 @@
             {#each list as s (s.id)}
               {@render serverItem(s)}
             {:else}
-              <li class="folder-empty">Leer — Server hierher ziehen</li>
+              <li class="folder-empty">{t("sidebar.folderEmpty")}</li>
             {/each}
           </ul>
         {/if}
@@ -443,20 +437,20 @@
         <section
           class="folder unfiled"
           class:drop={dropTarget === "unfiled"}
-          aria-label="Ohne Ordner"
+          aria-label={t("server.noFolder")}
           ondragover={(e) => onDragOver(e, "unfiled")}
           ondragleave={(e) => onDragLeave(e, "unfiled")}
           ondrop={(e) => onDrop(e, "unfiled")}
         >
           <div class="folder-head static">
-            <span class="folder-name">Ohne Ordner</span>
+            <span class="folder-name">{t("server.noFolder")}</span>
             <span class="count">{unfiledServers.length}</span>
           </div>
           <ul class="servers nested">
             {#each unfiledServers as s (s.id)}
               {@render serverItem(s)}
             {:else}
-              <li class="folder-empty">Hierher ziehen, um aus dem Ordner zu nehmen</li>
+              <li class="folder-empty">{t("sidebar.unfiledDrop")}</li>
             {/each}
           </ul>
         </section>

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::error::AppResult;
 use crate::keygen;
 use crate::models::{AuthMode, Server};
+use crate::msg::Msg;
 use crate::ssh_config::{self, ParsedHost};
 use crate::state::AppState;
 use crate::storage::Store;
@@ -31,7 +32,7 @@ pub struct ImportCandidate {
     /// A server with this name already exists in terminalox.
     pub already_exists: bool,
     /// Why it cannot be imported, if so.
-    pub problem: Option<String>,
+    pub problem: Option<Msg>,
     /// How login will work: "key", "agent" or "password".
     pub auth: &'static str,
 }
@@ -69,7 +70,7 @@ fn candidate(store: &Store, h: ParsedHost) -> ImportCandidate {
         .and_then(|_| validate::user(&effective_user))
         .and_then(|_| validate::name(&h.alias))
         .err()
-        .map(|e| e.to_string());
+        .map(|e| e.to_msg());
     let already_exists = validate::unique_name(store, &h.alias, None).is_err();
     let auth = if identity_for(&h).is_some() {
         "key"
@@ -100,11 +101,32 @@ pub async fn preview_ssh_config_import(
 pub struct ConfigImportReport {
     pub servers_added: usize,
     pub keys_imported: usize,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<HostWarning>,
+}
+
+/// A problem with one host (`alias`) during import.
+#[derive(Debug, Serialize)]
+pub struct HostWarning {
+    pub alias: String,
+    pub msg: Msg,
+}
+
+impl ConfigImportReport {
+    fn warn(&mut self, alias: &str, msg: Msg) {
+        self.warnings.push(HostWarning {
+            alias: alias.to_string(),
+            msg,
+        });
+    }
 }
 
 /// Finds an already imported key with the same fingerprint, or imports the file.
-fn key_for_file(store: &mut Store, path: &str, report: &mut ConfigImportReport) -> Option<Uuid> {
+fn key_for_file(
+    store: &mut Store,
+    alias: &str,
+    path: &str,
+    report: &mut ConfigImportReport,
+) -> Option<Uuid> {
     let content = std::fs::read_to_string(path).ok()?;
     let key = PrivateKey::from_openssh(&content).ok()?;
     let fp = keygen::fingerprint_of(key.public_key());
@@ -130,13 +152,17 @@ fn key_for_file(store: &mut Store, path: &str, report: &mut ConfigImportReport) 
                 report.keys_imported += 1;
                 return Some(id);
             }
-            Err(crate::error::AppError::Invalid(msg)) if msg.contains("existiert bereits") => {
-                continue
-            }
+            Err(crate::error::AppError::Msg(m)) if m.code == "key_exists" => continue,
             Err(e) => {
-                report
-                    .warnings
-                    .push(format!("Key {path} nicht importiert: {e}"));
+                report.warn(
+                    alias,
+                    msg!(
+                        "import_key_failed",
+                        "Key {path} not imported: {detail}",
+                        path = path,
+                        detail = e
+                    ),
+                );
                 return None;
             }
         }
@@ -183,17 +209,15 @@ pub async fn import_ssh_config_hosts(
     for h in hosts.into_iter().filter(|h| aliases.contains(&h.alias)) {
         let c = candidate(&store, h.clone());
         if let Some(p) = c.problem {
-            report.warnings.push(format!("{}: {p}", h.alias));
+            report.warn(&h.alias, p);
             continue;
         }
         if c.already_exists {
-            report
-                .warnings
-                .push(format!("{}: existiert bereits, übersprungen", h.alias));
+            report.warn(&h.alias, msg!("import_exists", "Already exists, skipped"));
             continue;
         }
         let auth = identity_for(&h)
-            .and_then(|f| key_for_file(&mut store, &f, &mut report))
+            .and_then(|f| key_for_file(&mut store, &h.alias, &f, &mut report))
             .map(|key_id| AuthMode::Key { key_id })
             .unwrap_or(AuthMode::Password);
         let mut server = Server {
@@ -212,7 +236,7 @@ pub async fn import_ssh_config_hosts(
             jump_server_id: None,
         };
         if let Err(e) = validate::server(&mut server) {
-            report.warnings.push(format!("{}: {e}", h.alias));
+            report.warn(&h.alias, e.to_msg());
             continue;
         }
         added.push((server.id, h.proxy_jump.clone()));
@@ -234,9 +258,14 @@ pub async fn import_ssh_config_hosts(
                     .find_server(id)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
-                report.warnings.push(format!(
-                    "{name}: Jump-Host „{spec}“ ist nicht in terminalox angelegt — bitte nachtragen"
-                ));
+                report.warn(
+                    &name,
+                    msg!(
+                        "import_jump_missing",
+                        "Jump host \"{spec}\" is not set up in terminalox, please add it",
+                        spec = spec
+                    ),
+                );
             }
         }
     }

@@ -3,6 +3,7 @@ use russh::ChannelMsg;
 
 use crate::access::Login;
 use crate::error::{AppError, AppResult};
+use crate::msg::Msg;
 use crate::ssh::client::{self, KnownHostsVerify};
 
 // Prefix `00-` so the drop-in is loaded before other files in
@@ -34,7 +35,7 @@ pub enum HardenReadiness {
     /// must collect a sudo password from the user.
     Ready { method: PrivilegeMethod },
     /// Harden is not possible on this server/user combination.
-    Unavailable { reason: String },
+    Unavailable { reason: Msg },
 }
 
 #[derive(Default, Debug, Clone)]
@@ -43,13 +44,26 @@ pub struct HardenOutcome {
     pub sshd_validated: bool,
     pub sshd_reloaded: bool,
     pub password_auth_confirmed_disabled: bool,
+    /// Raw stderr of the server-side transaction (technical detail).
     pub stderr: String,
+    /// Why hardening did not complete; `None` on success.
+    pub failure: Option<Msg>,
     committed: bool,
 }
 
 impl HardenOutcome {
     pub fn all_ok(&self) -> bool {
         self.committed
+    }
+
+    /// Why it failed, for reports.
+    pub fn failure_msg(&self) -> Msg {
+        self.failure.clone().unwrap_or_else(|| {
+            msg!(
+                "harden_failed_no_detail",
+                "Hardening failed (no detail from the server)"
+            )
+        })
     }
 }
 
@@ -97,10 +111,10 @@ fi
             .map(str::trim)
             .unwrap_or("bash, flock, setsid");
         return Ok(HardenReadiness::Unavailable {
-            reason: format!(
-                "Für den automatischen Rollback fehlen auf dem Server: {missing}. \
-                 Bitte nachinstallieren (z. B. Alpine: `apk add bash util-linux`, \
-                 Debian/Ubuntu: `apt install bash util-linux`) und erneut versuchen."
+            reason: msg!(
+                "harden_missing_tools",
+                "The server lacks tools needed for the automatic rollback: {missing}. Please install them (e.g. Alpine: `apk add bash util-linux`, Debian/Ubuntu: `apt install bash util-linux`) and try again.",
+                missing = missing
             ),
         });
     }
@@ -147,12 +161,10 @@ fi
                 || err_lc.contains("not allowed")
             {
                 Ok(HardenReadiness::Unavailable {
-                    reason: format!(
-                        "Dein User ist nicht in der sudoers-Liste und kann daher kein sudo \
-                         ausführen. Härten ist so nicht möglich. Optionen: als root-User \
-                         einloggen, oder den User auf dem Server zur sudo-Gruppe hinzufügen \
-                         (`usermod -aG sudo <user>`). Server-Antwort: {}",
-                        sudo_err.trim()
+                    reason: msg!(
+                        "harden_not_sudoer",
+                        "Your user is not in the sudoers list and cannot run sudo, so hardening is not possible. Options: log in as root, or add the user to the sudo group on the server (`usermod -aG sudo <user>`). Server response: {detail}",
+                        detail = sudo_err.trim()
                     ),
                 })
             } else {
@@ -164,12 +176,17 @@ fi
             }
         }
         Some("missing") => Ok(HardenReadiness::Unavailable {
-            reason: "Auf dem Server ist kein sudo installiert und der User ist nicht root. \
-                     Härten ist nicht möglich."
-                .into(),
+            reason: msg!(
+                "harden_no_sudo",
+                "sudo is not installed on the server and the user is not root. Hardening is not possible."
+            ),
         }),
         _ => Ok(HardenReadiness::Unavailable {
-            reason: format!("Unerwartete Antwort vom Server: {stdout}"),
+            reason: msg!(
+                "harden_unexpected",
+                "Unexpected response from the server: {detail}",
+                detail = stdout
+            ),
         }),
     }
 }
@@ -183,8 +200,6 @@ pub async fn harden(
     let token = uuid::Uuid::new_v4();
     let password = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
     let apply = build_transaction_command("apply", token, ROLLBACK_SECONDS);
-    let rollback_notice =
-        "Solange die Änderung unbestätigt ist, bleibt der automatische Rollback aktiv.";
     let (exit, stdout, stderr) = match tokio::time::timeout(
         SSH_STEP_TIMEOUT,
         exec_collect(session, &apply, &password),
@@ -194,13 +209,20 @@ pub async fn harden(
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
             return Ok(HardenOutcome {
-                stderr: format!("{error}. {rollback_notice}"),
+                failure: Some(msg!(
+                    "harden_failed_pending",
+                    "Hardening failed: {detail}. While the change is unconfirmed, the automatic rollback stays active.",
+                    detail = error
+                )),
                 ..Default::default()
             });
         }
         Err(_) => {
             return Ok(HardenOutcome {
-                stderr: format!("SSH-Härtung hat das Zeitlimit überschritten. {rollback_notice}"),
+                failure: Some(msg!(
+                    "harden_timeout",
+                    "SSH hardening timed out. While the change is unconfirmed, the automatic rollback stays active."
+                )),
                 ..Default::default()
             });
         }
@@ -208,12 +230,20 @@ pub async fn harden(
     let rolled_back = stdout.lines().any(|line| line.trim() == "STEP:rolled_back");
     let mut outcome = parse_harden_stdout(&stdout, stderr);
     if exit != 0 || !outcome.dropin_installed || !outcome.sshd_validated || !outcome.sshd_reloaded {
-        let notice = if rolled_back {
-            "Die vorherige SSH-Konfiguration wurde sofort wiederhergestellt."
+        let detail = format!("exit {exit}: {}", outcome.stderr.trim());
+        outcome.failure = Some(if rolled_back {
+            msg!(
+                "harden_failed_restored",
+                "Hardening failed ({detail}). The previous SSH configuration was restored immediately.",
+                detail = detail
+            )
         } else {
-            rollback_notice
-        };
-        outcome.stderr = format!("exit {exit}: {}. {notice}", outcome.stderr.trim());
+            msg!(
+                "harden_failed_pending",
+                "Hardening failed: {detail}. While the change is unconfirmed, the automatic rollback stays active.",
+                detail = detail
+            )
+        });
         return Ok(outcome);
     }
 
@@ -238,14 +268,17 @@ pub async fn harden(
             outcome.committed = true;
         }
         Ok(Err(error)) => {
-            outcome.stderr = format!(
-                "Bestätigung über neue SSH-Verbindung fehlgeschlagen: {error}. {rollback_notice}"
-            );
+            outcome.failure = Some(msg!(
+                "harden_confirm_failed",
+                "Confirmation over a new SSH connection failed: {detail}. While the change is unconfirmed, the automatic rollback stays active.",
+                detail = error
+            ));
         }
         Err(_) => {
-            outcome.stderr = format!(
-                "Bestätigung über neue SSH-Verbindung hat das Zeitlimit überschritten. {rollback_notice}"
-            );
+            outcome.failure = Some(msg!(
+                "harden_confirm_timeout",
+                "Confirmation over a new SSH connection timed out. While the change is unconfirmed, the automatic rollback stays active."
+            ));
         }
     }
     Ok(outcome)
@@ -263,9 +296,11 @@ async fn connect_after_reload(login: &Login) -> AppResult<russh::client::Handle<
             } if !remaining_methods.contains(&MethodKind::Password)
                 && !remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
             _ => {
-                return Err(AppError::Other(
-                    "Die neue SSH-Verbindung bietet weiterhin Passwortverfahren an oder verlangt keine Authentifizierung.".into(),
-                ));
+                return Err(msg!(
+                    "harden_password_still_offered",
+                    "The new SSH connection still offers password methods or requires no authentication."
+                )
+                .into());
             }
         }
         client::authenticate(&mut session, user, &login.cred).await?;
@@ -305,7 +340,11 @@ fi
     let mut outcome = parse_verify_stdout(&stdout);
     if exit != 0 {
         outcome.effective_password_auth_off = None;
-        outcome.effective_check_error = Some(stderr.trim().to_string());
+        outcome.effective_check_error = Some(msg!(
+            "verify_failed",
+            "Effective check failed: {detail}",
+            detail = stderr.trim()
+        ));
     }
     Ok(outcome)
 }
@@ -318,7 +357,7 @@ pub struct VerifyOutcome {
     /// `Some(false)` = effective PasswordAuthentication is `yes` (drift!).
     /// `None` = couldn't determine (no sudo / sshd -T unavailable).
     pub effective_password_auth_off: Option<bool>,
-    pub effective_check_error: Option<String>,
+    pub effective_check_error: Option<Msg>,
 }
 
 impl VerifyOutcome {
@@ -388,16 +427,32 @@ fn parse_verify_stdout(stdout: &str) -> VerifyOutcome {
             "EFFECTIVE:off" => o.effective_password_auth_off = Some(true),
             s if s.starts_with("EFFECTIVE:on") => o.effective_password_auth_off = Some(false),
             "EFFECTIVE:unknown" => {
-                o.effective_check_error =
-                    Some("sshd -T lieferte keinen PasswordAuthentication-Wert".into());
+                o.effective_check_error = Some(msg!(
+                    "verify_unknown",
+                    "sshd -T returned no PasswordAuthentication value"
+                ));
             }
             s if s.starts_with("EFFECTIVE:skipped:") => {
                 let reason = s.trim_start_matches("EFFECTIVE:skipped:");
                 o.effective_check_error = Some(match reason {
-                    "no_sudo" => "Kein sudo verfügbar — Effektiv-Check übersprungen".into(),
-                    "needs_sudo_password" => "Effektiv-Check braucht ein sudo-Passwort".into(),
-                    "sudo_auth_failed" => "sudo hat das Passwort abgelehnt".into(),
-                    other => format!("Effektiv-Check übersprungen: {other}"),
+                    "no_sudo" => msg!(
+                        "verify_no_sudo",
+                        "No sudo available, effective check skipped"
+                    ),
+                    "needs_sudo_password" => {
+                        msg!(
+                            "verify_needs_sudo_password",
+                            "The effective check needs a sudo password"
+                        )
+                    }
+                    "sudo_auth_failed" => {
+                        msg!("verify_sudo_rejected", "sudo rejected the password")
+                    }
+                    other => msg!(
+                        "verify_skipped",
+                        "Effective check skipped: {detail}",
+                        detail = other
+                    ),
                 });
             }
             _ => {}

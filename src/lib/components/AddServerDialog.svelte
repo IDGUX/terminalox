@@ -3,6 +3,7 @@
   import { toast } from "$lib/stores/toast.svelte";
   import type { AuthMode, Server, Uuid } from "$lib/types";
   import ColorPicker from "./ColorPicker.svelte";
+  import { errorText, t } from "$lib/i18n/index.svelte";
   import JumpHostSelect from "./JumpHostSelect.svelte";
 
   let {
@@ -16,7 +17,7 @@
     template?: Server | null;
   } = $props();
 
-  let name = $state(template ? `${template.name} (Kopie)` : "");
+  let name = $state(template ? t("add.copyName", { name: template.name }) : "");
   let host = $state(template?.host ?? "");
   let port = $state(template?.port ?? 22);
   let user = $state(template?.user ?? "");
@@ -43,7 +44,7 @@
     let auth: AuthMode;
     if (authMode === "key") {
       if (!keyId) {
-        error = "Bitte einen Key auswählen.";
+        error = t("server.pickKey");
         return;
       }
       auth = { mode: "key", key_id: keyId };
@@ -64,10 +65,10 @@
         folder_id: folderId || null,
         jump_server_id: jumpId || null,
       });
-      toast.success(`Server „${s.name}" hinzugefügt`);
+      toast.success(t("add.toast", { name: s.name }));
       onClose();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       submitting = false;
     }
@@ -81,31 +82,31 @@
 <!-- Kein Schließen per Klick daneben: ein verirrter Klick würde alle Eingaben verwerfen. -->
 <div class="overlay">
   <form class="dialog" onsubmit={submit}>
-    <h3>{template ? "Server duplizieren" : "Neuer Server"}</h3>
+    <h3>{template ? t("add.duplicateTitle") : t("add.title")}</h3>
     <label>
-      Name
-      <input bind:value={name} placeholder="z.B. prod-web" required autofocus />
+      {t("server.name")}
+      <input bind:value={name} placeholder={t("add.namePlaceholder")} required autofocus />
     </label>
     <div class="row">
       <label class="grow">
-        Host
+        {t("server.host")}
         <input bind:value={host} placeholder="example.com" required />
       </label>
       <label>
-        Port
+        {t("server.port")}
         <input type="number" bind:value={port} min="1" max="65535" />
       </label>
     </div>
     <label>
-      User
+      {t("server.user")}
       <input bind:value={user} placeholder="root" required />
     </label>
 
     {#if app.folders.length > 0}
       <label>
-        Ordner
+        {t("server.folder")}
         <select bind:value={folderId}>
-          <option value="">— Ohne Ordner —</option>
+          <option value="">— {t("server.noFolder")} —</option>
           {#each app.folders as f (f.id)}
             <option value={f.id}>{f.name}</option>
           {/each}
@@ -116,68 +117,54 @@
     <JumpHostSelect bind:value={jumpId} excludeId={null} />
 
     <div class="color-field">
-      Farbe
+      {t("color.label")}
       <ColorPicker bind:value={color} />
     </div>
 
     <fieldset class="auth">
-      <legend>Auth</legend>
+      <legend>{t("server.auth")}</legend>
       <label class="radio">
         <input type="radio" name="auth" value="password" bind:group={authMode} />
-        <span>Passwort</span>
+        <span>{t("server.authPassword")}</span>
       </label>
       <label class="radio">
         <input type="radio" name="auth" value="key" bind:group={authMode} />
-        <span>Bestehender Key</span>
+        <span>{t("server.authKey")}</span>
       </label>
-      <label class="radio" title="Keys aus dem laufenden ssh-agent (OpenSSH, 1Password, Pageant …)">
+      <label class="radio" title={t("server.authAgentTitle")}>
         <input type="radio" name="auth" value="agent" bind:group={authMode} />
         <span>ssh-agent</span>
       </label>
     </fieldset>
 
     {#if authMode === "password"}
-      <p class="hint">
-        Für die erste Verbindung mit Passwort. Danach kannst du mit einem Klick
-        einen SSH-Key deployen und die App schaltet auf Key-Auth um.
-      </p>
+      <p class="hint">{t("add.passwordHint")}</p>
     {:else if authMode === "agent"}
-      <p class="hint">
-        Login mit den Keys des laufenden ssh-agents (z.B. 1Password, Secretive,
-        <code>ssh-add</code>). terminalox speichert dafür keinen Key.
-      </p>
+      <p class="hint">{t("server.agentHint")}</p>
     {:else if keys.length === 0}
-      <p class="hint warn">
-        Du hast noch keinen Key in Terminalox. Wechsle in den <strong>Keys</strong>-Tab,
-        erstelle oder importiere einen Key, und kopiere den Public Key in die
-        Server-Bestellung (z.B. Hetzner) bevor du hier auf <em>Hinzufügen</em> klickst.
-      </p>
+      <p class="hint warn">{t("add.noKeys")}</p>
     {:else}
       <label>
-        Key
+        {t("server.key")}
         <select bind:value={keyId} required>
           {#each keys as k}
             <option value={k.id}>{k.name} ({k.algorithm})</option>
           {/each}
         </select>
       </label>
-      <p class="hint">
-        Der Public Key dieses Keys muss schon auf dem Server in
-        <code>~/.ssh/authorized_keys</code> liegen (z.B. von Hetzner beim
-        Bestellen injiziert).
-      </p>
+      <p class="hint">{t("add.keyHint")}</p>
     {/if}
 
     {#if error}<p class="error">{error}</p>{/if}
 
     <div class="buttons">
-      <button type="button" onclick={onClose}>Abbrechen</button>
+      <button type="button" onclick={onClose}>{t("common.cancel")}</button>
       <button
         type="submit"
         class="primary"
         disabled={submitting || (authMode === "key" && keys.length === 0)}
       >
-        Hinzufügen
+        {t("add.submit")}
       </button>
     </div>
   </form>

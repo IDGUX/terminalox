@@ -62,7 +62,7 @@ pub async fn write_session(
 ) -> AppResult<()> {
     let bytes = BASE64_STANDARD
         .decode(data_b64.as_bytes())
-        .map_err(|e| AppError::Other(format!("Ungültige Eingabedaten: {e}")))?;
+        .map_err(|e| AppError::Other(format!("invalid input data: {e}")))?;
     // Clone the sender so the map lock is not held while waiting for queue space.
     let tx = {
         let sessions = state.sessions.read().await;

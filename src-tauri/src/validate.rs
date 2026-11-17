@@ -8,7 +8,7 @@ use std::net::IpAddr;
 
 use uuid::Uuid;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::models::Server;
 use crate::storage::Store;
 
@@ -16,22 +16,21 @@ const MAX_NAME: usize = 64;
 const MAX_HOST: usize = 253;
 const MAX_USER: usize = 64;
 
-fn invalid(msg: impl Into<String>) -> AppError {
-    AppError::Invalid(msg.into())
-}
-
 pub fn name(raw: &str) -> AppResult<String> {
     let v = raw.trim();
     if v.is_empty() {
-        return Err(invalid("Name darf nicht leer sein"));
+        return Err(msg!("name_empty", "Name must not be empty").into());
     }
     if v.chars().count() > MAX_NAME {
-        return Err(invalid(format!(
-            "Name darf höchstens {MAX_NAME} Zeichen lang sein"
-        )));
+        return Err(msg!(
+            "name_too_long",
+            "Name must be at most {max} characters long",
+            max = MAX_NAME
+        )
+        .into());
     }
     if v.chars().any(char::is_control) {
-        return Err(invalid("Name enthält Steuerzeichen"));
+        return Err(msg!("name_control_chars", "Name contains control characters").into());
     }
     Ok(v.to_string())
 }
@@ -43,7 +42,7 @@ pub fn host(raw: &str) -> AppResult<String> {
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(v);
     if v.is_empty() {
-        return Err(invalid("Host darf nicht leer sein"));
+        return Err(msg!("host_empty", "Host must not be empty").into());
     }
     if v.parse::<IpAddr>().is_ok() {
         return Ok(v.to_string());
@@ -52,9 +51,12 @@ pub fn host(raw: &str) -> AppResult<String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
     if v.len() > MAX_HOST || !ok_chars || v.starts_with(['-', '.']) || v.contains("..") {
-        return Err(invalid(format!(
-            "„{v}“ ist kein gültiger Hostname und keine IP-Adresse"
-        )));
+        return Err(msg!(
+            "invalid_host",
+            "\"{value}\" is not a valid hostname or IP address",
+            value = v
+        )
+        .into());
     }
     Ok(v.to_string())
 }
@@ -62,20 +64,25 @@ pub fn host(raw: &str) -> AppResult<String> {
 pub fn user(raw: &str) -> AppResult<String> {
     let v = raw.trim();
     if v.is_empty() {
-        return Err(invalid("Benutzer darf nicht leer sein"));
+        return Err(msg!("user_empty", "User must not be empty").into());
     }
     let ok_chars = v
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | '$'));
     if v.len() > MAX_USER || !ok_chars || v.starts_with('-') {
-        return Err(invalid(format!("„{v}“ ist kein gültiger Benutzername")));
+        return Err(msg!(
+            "invalid_user",
+            "\"{value}\" is not a valid user name",
+            value = v
+        )
+        .into());
     }
     Ok(v.to_string())
 }
 
 pub fn port(p: u16) -> AppResult<u16> {
     if p == 0 {
-        return Err(invalid("Port muss zwischen 1 und 65535 liegen"));
+        return Err(msg!("invalid_port", "Port must be between 1 and 65535").into());
     }
     Ok(p)
 }
@@ -87,7 +94,12 @@ pub fn color(raw: Option<String>) -> AppResult<Option<String>> {
     if matches!(hex.len(), 3 | 6) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
         Ok(Some(c))
     } else {
-        Err(invalid(format!("„{c}“ ist keine gültige Farbe")))
+        Err(msg!(
+            "invalid_color",
+            "\"{value}\" is not a valid color",
+            value = c
+        )
+        .into())
     }
 }
 
@@ -99,9 +111,12 @@ pub fn unique_name(store: &Store, name: &str, except: Option<Uuid>) -> AppResult
         .iter()
         .any(|s| Some(s.id) != except && s.name.to_lowercase() == lc)
     {
-        return Err(invalid(format!(
-            "Ein Server namens „{name}“ existiert bereits"
-        )));
+        return Err(msg!(
+            "server_name_taken",
+            "A server named \"{name}\" already exists",
+            name = name
+        )
+        .into());
     }
     Ok(())
 }
@@ -120,10 +135,15 @@ pub fn server(s: &mut Server) -> AppResult<()> {
 pub fn public_key_line(line: &str) -> AppResult<&str> {
     let v = line.trim();
     if v.is_empty() || v.chars().any(char::is_control) {
-        return Err(invalid("ungültige Public-Key-Zeile"));
+        return Err(msg!("invalid_public_key", "Invalid public key line").into());
     }
-    russh::keys::PublicKey::from_openssh(v)
-        .map_err(|e| invalid(format!("ungültiger Public Key: {e}")))?;
+    russh::keys::PublicKey::from_openssh(v).map_err(|e| {
+        msg!(
+            "invalid_public_key_detail",
+            "Invalid public key: {detail}",
+            detail = e
+        )
+    })?;
     Ok(v)
 }
 

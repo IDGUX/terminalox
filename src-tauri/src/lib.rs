@@ -1,3 +1,5 @@
+#[macro_use]
+mod msg;
 mod access;
 mod commands;
 mod error;

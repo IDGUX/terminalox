@@ -1,5 +1,6 @@
 <script lang="ts">
   import { hostKeyPrompt } from "$lib/stores/hostkey.svelte";
+  import { t } from "$lib/i18n/index.svelte";
 
   const cur = $derived(hostKeyPrompt.current);
   const r = $derived(cur?.rejection ?? null);
@@ -22,24 +23,12 @@
   <div class="overlay">
     <div class="dialog" class:changed={r.changed} role="alertdialog" aria-modal="true">
       {#if r.changed}
-        <h3>⚠ Host-Key hat sich geändert</h3>
-        <p>
-          <strong>{target}</strong> zeigt einen anderen Schlüssel als beim letzten Mal.
-          Das passiert, wenn der Server neu installiert wurde. Es kann aber auch
-          ein Angriff sein, bei dem sich jemand als dein Server ausgibt
-          (Man-in-the-Middle).
-        </p>
-        <p>
-          Nur bestätigen, wenn du <strong>sicher weißt</strong>, dass der Server
-          neu aufgesetzt wurde, und der Fingerprint unten mit dem auf dem Server
-          übereinstimmt.
-        </p>
+        <h3>⚠ {t("hostkey.changedTitle")}</h3>
+        <p>{t("hostkey.changedBody", { target })}</p>
+        <p><strong>{t("hostkey.changedWarn")}</strong></p>
       {:else}
-        <h3>Erste Verbindung zu {target}</h3>
-        <p>
-          Dieser Server ist noch nicht bekannt. Bestätige seinen Fingerprint, damit
-          terminalox künftig erkennt, wenn sich jemand als dieser Server ausgibt.
-        </p>
+        <h3>{t("hostkey.newTitle", { target })}</h3>
+        <p>{t("hostkey.newBody")}</p>
       {/if}
 
       <div class="fp">
@@ -48,10 +37,9 @@
       </div>
 
       <p class="hint">
-        Zum Vergleichen auf dem Server, z.B. über die Web-Konsole des Anbieters:<br />
+        {t("hostkey.compareHint")}<br />
         <code>ssh-keygen -lf /etc/ssh/{keyFile}</code><br />
-        Der Key wird in <code>~/.ssh/known_hosts</code> gespeichert und gilt damit
-        auch für <code>ssh</code> im Terminal.
+        {t("hostkey.knownHostsHint")}
       </p>
 
       {#if hostKeyPrompt.error}<p class="error">{hostKeyPrompt.error}</p>{/if}
@@ -61,19 +49,19 @@
           <button
             class="danger"
             disabled={hostKeyPrompt.busy}
-            onclick={() => hostKeyPrompt.trust()}>Neuen Key trotzdem vertrauen</button>
+            onclick={() => hostKeyPrompt.trust()}>{t("hostkey.trustAnyway")}</button>
           <!-- svelte-ignore a11y_autofocus -->
           <button class="primary" autofocus onclick={() => hostKeyPrompt.reject()}>
-            Abbrechen
+            {t("common.cancel")}
           </button>
         {:else}
-          <button onclick={() => hostKeyPrompt.reject()}>Abbrechen</button>
+          <button onclick={() => hostKeyPrompt.reject()}>{t("common.cancel")}</button>
           <!-- svelte-ignore a11y_autofocus -->
           <button
             class="primary"
             autofocus
             disabled={hostKeyPrompt.busy}
-            onclick={() => hostKeyPrompt.trust()}>Vertrauen &amp; verbinden</button>
+            onclick={() => hostKeyPrompt.trust()}>{t("hostkey.trustConnect")}</button>
         {/if}
       </div>
     </div>

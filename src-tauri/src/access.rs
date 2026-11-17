@@ -105,19 +105,16 @@ fn target_inner(
         None => None,
         Some(jid) => {
             if visited.contains(&jid) {
-                return Err(AppError::Invalid(
-                    "Die Jump-Host-Kette enthält eine Schleife".into(),
-                ));
+                return Err(msg!("jump_loop", "The jump host chain contains a loop").into());
             }
             if visited.len() > MAX_JUMP_DEPTH {
-                return Err(AppError::Invalid(format!(
-                    "Jump-Host-Kette ist länger als {MAX_JUMP_DEPTH} Hops"
-                )));
+                return Err(jump_too_long());
             }
             let j = store.find_server(jid).ok_or_else(|| {
-                AppError::Invalid(format!(
-                    "Der Jump-Host von „{}“ existiert nicht mehr",
-                    server.name
+                AppError::from(msg!(
+                    "jump_missing",
+                    "The jump host of \"{name}\" no longer exists",
+                    name = server.name
                 ))
             })?;
             Some(Box::new(Hop {
@@ -136,25 +133,34 @@ fn target_inner(
     })
 }
 
+fn jump_too_long() -> AppError {
+    msg!(
+        "jump_too_long",
+        "Jump host chain is longer than {max} hops",
+        max = MAX_JUMP_DEPTH
+    )
+    .into()
+}
+
 /// Validates that setting `jump` as jump host of `server_id` creates no cycle.
 pub fn check_jump(store: &Store, server_id: Option<Uuid>, jump: Option<Uuid>) -> AppResult<()> {
     let mut cur = jump;
     let mut depth = 0;
     while let Some(id) = cur {
         if Some(id) == server_id {
-            return Err(AppError::Invalid(
-                "Ein Server kann nicht (indirekt) sein eigener Jump-Host sein".into(),
-            ));
+            return Err(msg!(
+                "jump_self",
+                "A server cannot be its own jump host, not even indirectly"
+            )
+            .into());
         }
         depth += 1;
         if depth > MAX_JUMP_DEPTH {
-            return Err(AppError::Invalid(format!(
-                "Jump-Host-Kette ist länger als {MAX_JUMP_DEPTH} Hops"
-            )));
+            return Err(jump_too_long());
         }
         let s = store
             .find_server(id)
-            .ok_or_else(|| AppError::Invalid("Jump-Host nicht gefunden".into()))?;
+            .ok_or_else(|| AppError::from(msg!("jump_not_found", "Jump host not found")))?;
         cur = s.jump_server_id;
     }
     Ok(())

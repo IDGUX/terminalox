@@ -1,5 +1,6 @@
 <script lang="ts">
   import { app } from "$lib/stores/app.svelte";
+  import { t } from "$lib/i18n/index.svelte";
   import type { Uuid } from "$lib/types";
 
   let {
@@ -33,20 +34,16 @@
 
 {#if candidates.length > 0}
   <label>
-    Jump-Host (Bastion)
+    {t("jump.label")}
     <select bind:value>
-      <option value="">— Direkt verbinden —</option>
+      <option value="">— {t("jump.direct")} —</option>
       {#each candidates as s (s.id)}
         <option value={s.id}>{s.name} ({s.user}@{s.host})</option>
       {/each}
     </select>
   </label>
   {#if value}
-    <p class="hint">
-      Die Verbindung läuft durch den gewählten Server, wie <code>ssh -J</code>.
-      Host und Port oben werden <em>vom Jump-Host aus</em> erreicht, also gehen auch
-      interne Adressen.
-    </p>
+    <p class="hint">{t("jump.hint")}</p>
   {/if}
 {/if}
 

@@ -3,6 +3,7 @@
   import { api } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { t, tm } from "$lib/i18n/index.svelte";
   import type { HardenReadiness, Server, Uuid } from "$lib/types";
 
   let {
@@ -61,21 +62,21 @@
   }
 
   function hardenButtonTitle(r: ReadinessState): string {
-    if (r.kind === "loading") return "Prüfe, ob Härten möglich ist …";
-    if (r.kind === "error") return `Konnte Readiness nicht prüfen: ${r.message}`;
-    if (r.kind === "done" && r.value.status === "unavailable") return r.value.reason;
+    if (r.kind === "loading") return t("actions.checkingReadiness");
+    if (r.kind === "error") return t("actions.readinessError", { detail: r.message });
+    if (r.kind === "done" && r.value.status === "unavailable") return tm(r.value.reason);
     if (r.kind === "done" && r.value.status === "ready") {
-      if (r.value.method === "root") return "Härten möglich (als root eingeloggt)";
-      if (r.value.method === "sudo_nopasswd") return "Härten möglich (passwortloses sudo)";
-      return "Härten möglich (sudo, sudo-Passwort wird einmalig abgefragt)";
+      if (r.value.method === "root") return t("actions.readyRoot");
+      if (r.value.method === "sudo_nopasswd") return t("actions.readyNopasswd");
+      return t("actions.readySudo");
     }
-    return "Passwort-Login serverseitig deaktivieren";
+    return t("actions.hardenDefault");
   }
 
   function hardenButtonLabel(r: ReadinessState): string {
-    if (r.kind === "loading") return "Prüfe …";
-    if (r.kind === "done" && r.value.status === "ready") return "Server härten";
-    return "Härten nicht verfügbar";
+    if (r.kind === "loading") return t("common.checking");
+    if (r.kind === "done" && r.value.status === "ready") return t("actions.harden");
+    return t("actions.hardenUnavailable");
   }
 
   function onHardenClick(s: Server) {
@@ -83,7 +84,7 @@
     if (r.kind === "done" && r.value.status === "ready") {
       onHarden(s, r.value);
     } else if (r.kind === "done" && r.value.status === "unavailable") {
-      toast.error(r.value.reason);
+      toast.error(tm(r.value.reason));
     } else if (r.kind === "error") {
       toast.error(r.message);
     }
@@ -92,7 +93,7 @@
   function showReadinessInfo(s: Server) {
     const r = currentReadiness(s);
     if (r.kind === "done" && r.value.status === "unavailable") {
-      toast.error(r.value.reason);
+      toast.error(tm(r.value.reason));
     } else if (r.kind === "error") {
       toast.error(r.message);
     }
@@ -109,20 +110,22 @@
         await app.refresh();
       }
       if (r.isHardened) {
-        toast.success(`Härtung bestätigt: Beide Passwortverfahren sind auf ${s.name} für diese Verbindung deaktiviert.`);
+        toast.success(t("actions.verifyOk", { name: s.name }));
       } else {
         // Drift erkannt
         const detail = !r.dropinPresent
-          ? "Drop-in fehlt auf dem Server."
+          ? t("actions.driftMissing")
           : !r.dropinContentIntact
-            ? "Drop-in wurde verändert."
+            ? t("actions.driftChanged")
             : r.effectivePasswordAuthOff === false
-              ? "Die SSH-Konfiguration erlaubt für diese Verbindung wieder ein Passwortverfahren."
-              : r.effectiveCheckError || "Die wirksame SSH-Konfiguration konnte nicht geprüft werden.";
-        toast.error(`⚠ Härtung nicht mehr intakt: ${detail}`);
+              ? t("actions.driftPasswordOn")
+              : r.effectiveCheckError
+                ? tm(r.effectiveCheckError)
+                : t("actions.driftUnchecked");
+        toast.error(`⚠ ${t("actions.driftTitle", { detail })}`);
       }
     } catch (e) {
-      toast.error(`Verify fehlgeschlagen: ${e}`);
+      toast.error(t("actions.verifyFailed", { detail: String(e) }));
     } finally {
       verifyingId = null;
     }
@@ -133,7 +136,7 @@
   {@const sel = server}
   {@const rd = currentReadiness(sel)}
   <div class="actions">
-    <button onclick={() => onDeploy(sel)}>SSH-Key deployen</button>
+    <button onclick={() => onDeploy(sel)}>{t("actions.deploy")}</button>
     {#if sel.auth.mode !== "password" && !sel.hardened}
       {@const ready = rd.kind === "done" && rd.value.status === "ready"}
       {@const showInfo =
@@ -152,8 +155,8 @@
             type="button"
             class="info-btn"
             onclick={() => showReadinessInfo(sel)}
-            title="Warum ist Härten nicht möglich?"
-            aria-label="Details anzeigen"
+            title={t("actions.whyUnavailable")}
+          aria-label={t("actions.showDetails")}
           >
             ⓘ
           </button>
@@ -165,28 +168,28 @@
         class="ghost-action"
         disabled={verifyingId === sel.id}
         onclick={() => verifyHardening(sel)}
-        title="Prüfen, ob das Drop-in noch da ist und sshd Passwort-Login weiterhin abweist."
+        title={t("actions.verifyTitle")}
       >
-        {verifyingId === sel.id ? "Prüfe …" : "🛡 Härtung prüfen"}
+        {verifyingId === sel.id ? t("common.checking") : `🛡 ${t("actions.verify")}`}
       </button>
     {/if}
     {#if sel.auth.mode === "key"}
       <button
         class="ghost-action neutral"
         onclick={() => onRotate(sel)}
-        title="Neuen Key erzeugen, auf dem Server eintragen, prüfen und den alten entfernen"
+        title={t("actions.rotateTitle")}
       >
-        ⟳ Key rotieren
+        ⟳ {t("actions.rotate")}
       </button>
     {/if}
     <div class="split-row">
-      <button onclick={() => onEdit(sel)}>Bearbeiten</button>
-      <button onclick={() => onDuplicate(sel)} title="Neuen Server mit denselben Daten anlegen">
-        Duplizieren
+      <button onclick={() => onEdit(sel)}>{t("actions.edit")}</button>
+      <button onclick={() => onDuplicate(sel)} title={t("actions.duplicateTitle")}>
+        {t("actions.duplicate")}
       </button>
     </div>
     <button class="danger" onclick={() => onDelete(sel)}>
-      Löschen…
+      {t("actions.delete")}
     </button>
   </div>
 {/if}

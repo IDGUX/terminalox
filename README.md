@@ -11,7 +11,7 @@
 
 A small cross-platform SSH terminal with **one-click server hardening**.
 
-The use case this was built for: you SSH into a lot of boxes every day, but setting up SSH keys per server is enough friction that you end up typing passwords. terminalox fixes that — add a server once, click **Deployen + Härten**, and the app:
+The use case this was built for: you SSH into a lot of boxes every day, but setting up SSH keys per server is enough friction that you end up typing passwords. terminalox fixes that — add a server once, click **Deploy + harden**, and the app:
 
 1. generates an Ed25519 keypair,
 2. pushes the public key into `~/.ssh/authorized_keys` on the server,
@@ -24,17 +24,18 @@ Hardening needs root or `sudo`, `bash` and `flock` on the server, and a running 
 
 ## Remove a server entry
 
-- **Server already decommissioned** — Uncheck **SSH-Key auch vom Server entfernen** in the delete dialog. To also remove the associated key files from your computer, select **Zugehörigen privaten SSH-Key lokal löschen**. This works without an SSH connection. If another server entry uses the key, terminalox keeps it.
-- **Server still reachable** — Keep **SSH-Key auch vom Server entfernen** selected to remove the public key from the server. terminalox makes sure you keep a way in:
+- **Server already decommissioned** — Uncheck **Also remove the SSH key from the server** in the delete dialog. To also remove the associated key files from your computer, select **Delete the associated private SSH key locally**. This works without an SSH connection. If another server entry uses the key, terminalox keeps it.
+- **Server still reachable** — Keep **Also remove the SSH key from the server** selected to remove the public key from the server. terminalox makes sure you keep a way in:
   - **With a password:** If the entry is marked as hardened, terminalox first undoes its SSH configuration changes. It then requires a successful password login over a fresh SSH connection before removing the public key. If that login fails, terminalox re-applies the hardening and keeps the key.
-  - **Without a password** (key-only accounts, typical for cloud servers): Leave the password empty and confirm **Kein Passwort – ich habe einen anderen SSH-Key für diesen Account**. terminalox removes the key over the key itself and refuses if no other key would remain in `authorized_keys`. The hardening stays in place.
+  - **Without a password** (key-only accounts, typical for cloud servers): Leave the password empty and confirm **No password: I have another SSH key for this account**. terminalox removes the key over the key itself and refuses if no other key would remain in `authorized_keys`. The hardening stays in place.
 
-  If remote cleanup fails, you can retry or choose **Nur lokal löschen** to remove the entry and keep the local key.
+  If remote cleanup fails, you can retry or choose **Delete locally only** to remove the entry and keep the local key.
 
 You can remove unused keys from previously deleted server entries in the key management view.
 
 ## Features
 
+- English (US) and German UI, following the system language (switch with EN | DE in the tab bar).
 - Interactive SSH terminal with tabs and split panes (xterm.js, full PTY, binary IPC channel).
 - SSH host-key verification using `~/.ssh/known_hosts`, with a fingerprint prompt for new keys.
 - Ed25519 key generation (optionally passphrase-protected) + import of existing keys, including encrypted ones.

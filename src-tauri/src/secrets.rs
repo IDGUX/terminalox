@@ -71,7 +71,11 @@ impl Secrets {
             keyring::Entry::new(SERVICE, &account(kind, id))
                 .and_then(|e| e.set_password(value))
                 .map_err(|e| {
-                    AppError::Other(format!("Speichern im Schlüsselbund fehlgeschlagen: {e}"))
+                    AppError::from(msg!(
+                        "keychain_save_failed",
+                        "Saving to the keychain failed: {detail}",
+                        detail = e
+                    ))
                 })?;
         }
         Ok(())

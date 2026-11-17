@@ -1,6 +1,7 @@
 import { Channel, invoke as rawInvoke } from "@tauri-apps/api/core";
 import { hostKeyPrompt } from "./stores/hostkey.svelte";
 import { secretPrompt } from "./stores/secret.svelte";
+import { errorText, t } from "./i18n/index.svelte";
 import type {
   AuthMode,
   ConfigImportReport,
@@ -35,13 +36,7 @@ function secretError(e: unknown): SecretRequest | null {
   return null;
 }
 
-/** Fehlertext für Anzeige, auch für strukturierte Fehler aus dem Backend. */
-export function errorText(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
-}
+export { errorText };
 
 /** Wie `invoke`, aber fehlende Zustimmung oder Secrets werden beim Nutzer erfragt
  *  und der Aufruf danach wiederholt:
@@ -55,7 +50,7 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
     const hk = hostKeyError(e);
     if (hk) {
       if (!(await hostKeyPrompt.ask(hk))) {
-        throw `Verbindung zu ${hk.host} abgebrochen: Host-Key nicht bestätigt.`;
+        throw t("api.hostKeyAborted", { host: hk.host });
       }
       return invoke<T>(cmd, args);
     }
@@ -63,8 +58,8 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
     if (sr) {
       if (!(await secretPrompt.ask(sr))) {
         throw sr.kind === "passphrase"
-          ? `Abgebrochen: Passphrase für „${sr.label}“ nicht eingegeben.`
-          : `Abgebrochen: Passwort für „${sr.label}“ nicht eingegeben.`;
+          ? t("api.passphraseCancelled", { label: sr.label })
+          : t("api.passwordCancelled", { label: sr.label });
       }
       return invoke<T>(cmd, args);
     }
