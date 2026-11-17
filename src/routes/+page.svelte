@@ -37,10 +37,28 @@
   });
 
   onMount(async () => {
+    // Dev-only demo data for screenshots (`pnpm dev`, then open /?demo).
+    // The DEV guard lets production builds drop the demo module.
+    const params = new URLSearchParams(location.search);
+    const demo =
+      import.meta.env.DEV && params.has("demo")
+        ? (await import("$lib/demo")).setupDemo(params)
+        : null;
     try {
       await app.refresh();
     } catch (e) {
       loadError = errorText(e);
+    }
+    if (demo) {
+      app.view = demo.view;
+      app.selectedKeyId = demo.keyId;
+      const s = app.servers.find((x) => x.id === demo.serverId) ?? null;
+      app.selectedServerId = s?.id ?? null;
+      if (s && demo.dialog === "deploy") deployFor = s;
+      if (s && demo.dialog === "harden")
+        hardenFor = { server: s, readiness: { status: "ready", method: "sudo_with_password" } };
+      if (s && demo.dialog === "rotate") rotateFor = s;
+      if (demo.dialog === "import") configImport = true;
     }
   });
 </script>

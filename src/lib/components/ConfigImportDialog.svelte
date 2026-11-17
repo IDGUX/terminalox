@@ -86,7 +86,7 @@
                 {#if c.problem}<span class="bad">{tm(c.problem)}</span>
                 {:else if c.alreadyExists}<span class="muted">{t("cfgimport.exists")}</span>
                 {:else}
-                  {authLabel(c)}{#if c.proxyJump} · {t("cfgimport.via", { jump: c.proxyJump })}{/if}
+                  {authLabel(c)}{#if c.proxyJump}{" · "}{t("cfgimport.via", { jump: c.proxyJump })}{/if}
                 {/if}
               </span>
             </label>
