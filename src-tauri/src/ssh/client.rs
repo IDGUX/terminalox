@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use russh::client::{self, Config, Handle};
 use russh::keys::known_hosts;
-use russh::keys::{load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
@@ -54,7 +54,14 @@ pub struct KnownHostsVerify {
 impl client::Handler for KnownHostsVerify {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        // Certificate authorities are not part of terminalox's known_hosts policy.
+        let PublicKeyOrCertificate::PublicKey { key, .. } = server_key else {
+            return Ok(false);
+        };
         let changed = match host_key_status(&self.host, self.port, key) {
             HostKeyStatus::Trusted => return Ok(true),
             HostKeyStatus::Unknown => false,
