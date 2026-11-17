@@ -46,7 +46,7 @@ jobs:
         working-directory: src-tauri
         run: cargo check --all-targets
 
-      - name: Test key revocation against OpenSSH
+      - name: Test key revocation and timed hardening rollback against OpenSSH
         working-directory: src-tauri
         timeout-minutes: 15
         run: |
@@ -75,6 +75,19 @@ jobs:
           mkdir -p "$HOME/.ssh"
           printf '[127.0.0.1]:22222 %s\n' "$(cat "$fixture/host.pub")" >> "$HOME/.ssh/known_hosts"
           cargo test --lib revocation_requires_a_working_password_login -- --ignored
+
+          sudo kill "$(sudo cat "$fixture/sshd.pid")"
+          sudo install -m 600 -o terminalox-test "$TERMINALOX_TEST_KEY.pub" /home/terminalox-test/.ssh/authorized_keys
+          echo 'terminalox-test ALL=(root) /bin/bash' | sudo tee /etc/sudoers.d/terminalox-test >/dev/null
+          sudo chmod 0440 /etc/sudoers.d/terminalox-test
+          sudo visudo -cf /etc/sudoers.d/terminalox-test
+          sudo install -m 0644 "$fixture/sshd_config" /etc/ssh/sshd_config
+          sudo install -d -m 0755 /etc/ssh/sshd_config.d
+          printf '%s\n' '# Previous terminalox drop-in' 'PasswordAuthentication yes' |
+            sudo tee /etc/ssh/sshd_config.d/00-terminalox.conf >/dev/null
+          if systemctl is-active --quiet ssh.socket; then sudo systemctl stop ssh.socket; fi
+          sudo systemctl restart ssh.service
+          cargo test --lib hardening_restores_config_without_confirmation_and_commits_after_reconnect -- --ignored
 
       - name: cargo clippy
         working-directory: src-tauri
