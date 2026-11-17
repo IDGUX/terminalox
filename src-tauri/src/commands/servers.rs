@@ -83,14 +83,17 @@ pub struct DeleteServerOptions {
     /// Attempt to remove the deployed public key from the remote host's authorized_keys.
     #[serde(default)]
     pub cleanup_remote: bool,
-    /// Password for remote cleanup on password-auth servers.
+    /// On local-only deletion, also delete the assigned key if no server references it.
+    #[serde(default)]
+    pub delete_unused_local_key: bool,
+    /// Password used to verify fallback access before revoking a key.
     #[serde(default)]
     pub password: Option<String>,
     /// Sudo password used by unharden when the remote user needs one (Debian/Ubuntu default).
     /// Unused if the remote user is root or has NOPASSWD sudo.
     #[serde(default)]
     pub sudo_password: Option<String>,
-    /// Proceed with local deletion even if remote cleanup fails.
+    /// Delete only the local server entry and preserve its key.
     #[serde(default)]
     pub force: bool,
 }
@@ -106,6 +109,7 @@ pub struct DeleteServerReport {
     pub remote_cleanup_succeeded: bool,
     pub remote_cleanup_error: Option<String>,
     pub local_key_removed: bool,
+    pub local_key_error: Option<String>,
     pub key_still_referenced: bool,
 }
 
@@ -129,7 +133,17 @@ pub async fn delete_server_full(
 
     let mut report = DeleteServerReport::default();
 
-    if opts.cleanup_remote {
+    if opts.cleanup_remote && !opts.force {
+        // Require the fallback credential before changing the remote configuration.
+        let password = opts.password.as_deref().filter(|password| !password.is_empty());
+        if assigned_key.is_some() && password.is_none() {
+            report.remote_cleanup_attempted = true;
+            report.remote_cleanup_error = Some(
+                "Vor dem Entfernen des SSH-Keys muss ein Passwort-Login geprüft werden.".into(),
+            );
+            return Ok(report);
+        }
+
         // Step A: if server is hardened, unharden first so password auth comes back.
         //         The unharden session uses the current key (we still have it).
         if server.hardened {
@@ -152,53 +166,28 @@ pub async fn delete_server_full(
                 Err(e @ AppError::HostKey(_)) => return Err(e),
                 Err(e) => {
                     report.remote_unharden_error = Some(e.to_string());
-                    if !opts.force {
-                        return Ok(report);
-                    }
+                    return Ok(report);
                 }
             }
         }
 
         // Step B: remove the deployed public key from authorized_keys.
-        if let Some(key) = &assigned_key {
+        if let (Some(key), Some(password)) = (&assigned_key, password) {
             report.remote_cleanup_attempted = true;
-            let result = match &server.auth {
-                AuthMode::Key { .. } => {
-                    revoke::revoke_with_key(
-                        &server.host,
-                        server.port,
-                        &server.user,
-                        &key.private_path,
-                        &key.public_openssh,
-                    )
-                    .await
-                }
-                AuthMode::Password => {
-                    let pw = opts.password.as_deref().unwrap_or("");
-                    if pw.is_empty() {
-                        Err(AppError::Other(
-                            "Passwort wird für Remote-Cleanup bei Passwort-Auth benötigt".into(),
-                        ))
-                    } else {
-                        revoke::revoke_with_password(
-                            &server.host,
-                            server.port,
-                            &server.user,
-                            pw,
-                            &key.public_openssh,
-                        )
-                        .await
-                    }
-                }
-            };
+            let result = revoke::revoke_with_password(
+                &server.host,
+                server.port,
+                &server.user,
+                password,
+                &key.public_openssh,
+            )
+            .await;
             match result {
                 Ok(()) => report.remote_cleanup_succeeded = true,
                 Err(e @ AppError::HostKey(_)) => return Err(e),
                 Err(e) => {
                     report.remote_cleanup_error = Some(e.to_string());
-                    if !opts.force {
-                        return Ok(report);
-                    }
+                    return Ok(report);
                 }
             }
         }
@@ -206,25 +195,27 @@ pub async fn delete_server_full(
 
     // Local delete.
     let mut store = state.store.write().await;
-
-    let before = store.servers.len();
+    let current_server = store.find_server(opts.id).ok_or(AppError::UnknownServer)?;
+    let current_key = assigned_key.and_then(|key| match &current_server.auth {
+        AuthMode::Key { key_id } if *key_id == key.id => store.find_key(*key_id).cloned(),
+        _ => None,
+    });
     store.servers.retain(|s| s.id != opts.id);
-    if store.servers.len() == before {
-        return Err(AppError::UnknownServer);
-    }
     report.server_removed = true;
 
-    if let Some(key) = assigned_key {
+    if let Some(key) = current_key {
         let still_referenced = store
             .servers
             .iter()
             .any(|s| matches!(&s.auth, AuthMode::Key { key_id } if *key_id == key.id));
         report.key_still_referenced = still_referenced;
-        if !still_referenced {
-            store.keys.retain(|k| k.id != key.id);
+        let remove_local_key = report.remote_cleanup_succeeded
+            || (!opts.cleanup_remote && !opts.force && opts.delete_unused_local_key);
+        if !still_referenced && remove_local_key {
             if let Err(e) = keygen::delete_key_files(&key) {
-                tracing::warn!("failed to delete key files: {e}");
+                report.local_key_error = Some(e.to_string());
             } else {
+                store.keys.retain(|k| k.id != key.id);
                 report.local_key_removed = true;
             }
         }
