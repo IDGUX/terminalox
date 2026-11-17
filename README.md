@@ -20,12 +20,16 @@ The use case this was built for: you SSH into a lot of boxes every day, but sett
 5. validates `sshd -t` + reloads sshd,
 6. opens a fresh SSH connection, verifies key login again and confirms that both password methods are disabled for that connection.
 
-Hardening requires a reloadable systemd SSH service and permission to schedule a system timer. Before editing the SSH configuration, terminalox saves the affected files and schedules a server-side rollback after two minutes. It cancels the rollback and marks the server 🛡 *hardened* after the fresh connection passes verification. If the client disconnects or verification fails, the timer restores the previous configuration and reloads SSH.
+Hardening needs root or `sudo`, `bash` and `flock` on the server, and a running SSH service that can be reloaded through systemd, OpenRC or `service`. Before editing the SSH configuration, terminalox saves the affected files and schedules a server-side rollback after two minutes: a transient systemd timer where available, otherwise a detached background process started with `setsid`. If a step on the server fails, terminalox restores the previous configuration immediately. It cancels the rollback and marks the server 🛡 *hardened* after the fresh connection passes verification. If the client disconnects or verification fails, the timer restores the previous configuration and reloads SSH. Minimal images such as Alpine may need `apk add bash` first; the hardening dialog names any missing tool.
 
 ## Remove a server entry
 
 - **Server already decommissioned** — Uncheck **SSH-Key auch vom Server entfernen** in the delete dialog. To also remove the associated key files from your computer, select **Zugehörigen privaten SSH-Key lokal löschen**. This works without an SSH connection. If another server entry uses the key, terminalox keeps it.
-- **Server still reachable** — Keep **SSH-Key auch vom Server entfernen** selected to remove the public key from the server. If the entry is marked as hardened, terminalox first attempts to undo its SSH configuration changes. It requires a successful password login over a fresh SSH connection before removing the public key. If remote cleanup fails, you can retry or choose **Nur lokal löschen** to remove the entry and keep the local key.
+- **Server still reachable** — Keep **SSH-Key auch vom Server entfernen** selected to remove the public key from the server. terminalox makes sure you keep a way in:
+  - **With a password:** If the entry is marked as hardened, terminalox first undoes its SSH configuration changes. It then requires a successful password login over a fresh SSH connection before removing the public key. If that login fails, terminalox re-applies the hardening and keeps the key.
+  - **Without a password** (key-only accounts, typical for cloud servers): Leave the password empty and confirm **Kein Passwort – ich habe einen anderen SSH-Key für diesen Account**. terminalox removes the key over the key itself and refuses if no other key would remain in `authorized_keys`. The hardening stays in place.
+
+  If remote cleanup fails, you can retry or choose **Nur lokal löschen** to remove the entry and keep the local key.
 
 You can remove unused keys from previously deleted server entries in the key management view.
 
@@ -109,7 +113,7 @@ src-tauri/
 
 ## Development checks
 
-Run `pnpm check` for frontend diagnostics, `pnpm build` for the static frontend build, and `cargo check --locked --all-targets` from `src-tauri/` to check the Rust targets. GitHub Actions also tests key revocation and timed rollback against OpenSSH on Linux.
+Run `pnpm check` for frontend diagnostics, `pnpm build` for the static frontend build, and `cargo check --locked --all-targets` from `src-tauri/` to check the Rust targets. GitHub Actions also tests key revocation and the timed rollback (systemd timer and `setsid` fallback) against OpenSSH on Linux.
 
 ## Security notes
 
@@ -118,7 +122,7 @@ Run `pnpm check` for frontend diagnostics, `pnpm build` for the static frontend 
 - terminalox checks `~/.ssh/known_hosts` before sending credentials. For a new key, compare the displayed SHA-256 fingerprint with a fingerprint obtained through a trusted channel before accepting it. A changed key of the same algorithm triggers a warning. Approving a replacement appends it to `known_hosts`; retire the old key separately once you have verified the rotation. An unreadable trust store can be treated as empty, and the parser does not honor OpenSSH `@revoked` markers.
 - Host verification uses public host keys. OpenSSH host certificates and certificate authority entries are currently unsupported.
 - SSH hardening installs `/etc/ssh/sshd_config.d/00-terminalox.conf` and may add a managed `Include` block to `/etc/ssh/sshd_config`. Uninstalling terminalox leaves the remote configuration in place.
-- Hardening changes a daemon-wide SSH configuration. Verification evaluates `Match` rules for the tested SSH user and connection. Other users or source addresses can have different settings. Keep a separate recovery channel available. The transient systemd timer survives an SSH disconnect; a server reboot or a failed service reload may require manual recovery. Pending rollback files are stored in `/etc/ssh/.terminalox-pending`.
+- Hardening changes a daemon-wide SSH configuration. Verification evaluates `Match` rules for the tested SSH user and connection. Other users or source addresses can have different settings. Keep a separate recovery channel available. The rollback timer (transient systemd timer or detached `setsid` process) survives an SSH disconnect; a server reboot or a failed service reload may require manual recovery. Pending rollback files are stored in `/etc/ssh/.terminalox-pending`.
 - Backups protected by a passphrase use AES-256-GCM with Argon2id (64 MiB, 3 iterations, 4 lanes). Plain JSON backups contain private keys in base64. Set a passphrase to protect exported keys.
 
 ## Roadmap

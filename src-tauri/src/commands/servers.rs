@@ -93,6 +93,10 @@ pub struct DeleteServerOptions {
     /// Unused if the remote user is root or has NOPASSWD sudo.
     #[serde(default)]
     pub sudo_password: Option<String>,
+    /// Without a password: the user confirmed another key gives access to the
+    /// account. The revocation still refuses if no other key line remains.
+    #[serde(default)]
+    pub other_key_confirmed: bool,
     /// Delete only the local server entry and preserve its key.
     #[serde(default)]
     pub force: bool,
@@ -111,6 +115,42 @@ pub struct DeleteServerReport {
     pub local_key_removed: bool,
     pub local_key_error: Option<String>,
     pub key_still_referenced: bool,
+    /// Key-only cleanup leaves the terminalox hardening on the server.
+    pub hardening_kept: bool,
+    /// Revocation failed after unhardening and the hardening was re-applied.
+    pub hardening_restored: bool,
+    pub hardening_restore_error: Option<String>,
+}
+
+async fn restore_hardening(
+    server: &crate::models::Server,
+    key: &crate::models::KeyInfo,
+    sudo_password: Option<&str>,
+) -> Result<(), String> {
+    let session = harden::open_key_session(&server.host, server.port, &server.user, &key.private_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let outcome = harden::harden(
+        session,
+        (&server.host, server.port, &server.user, &key.private_path),
+        sudo_password,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if outcome.all_ok() {
+        Ok(())
+    } else {
+        Err(outcome.stderr)
+    }
+}
+
+/// Record that the server is no longer hardened so the UI does not claim otherwise.
+async fn mark_unhardened(state: &State<'_, AppState>, id: Uuid) -> AppResult<()> {
+    let mut store = state.store.write().await;
+    if let Some(s) = store.find_server_mut(id) {
+        s.hardened = false;
+    }
+    store.save(&state.store_file())
 }
 
 #[tauri::command]
@@ -134,60 +174,96 @@ pub async fn delete_server_full(
     let mut report = DeleteServerReport::default();
 
     if opts.cleanup_remote && !opts.force {
-        // Require the fallback credential before changing the remote configuration.
-        let password = opts.password.as_deref().filter(|password| !password.is_empty());
-        if assigned_key.is_some() && password.is_none() {
+        if let Some(key) = &assigned_key {
             report.remote_cleanup_attempted = true;
-            report.remote_cleanup_error = Some(
-                "Vor dem Entfernen des SSH-Keys muss ein Passwort-Login geprüft werden.".into(),
-            );
-            return Ok(report);
-        }
-
-        // Step A: if server is hardened, unharden first so password auth comes back.
-        //         The unharden session uses the current key (we still have it).
-        if server.hardened {
-            report.remote_unharden_attempted = true;
-            let unharden_result: AppResult<()> = (async {
-                let key = assigned_key
-                    .as_ref()
-                    .ok_or_else(|| AppError::Other("hardened server has no key reference".into()))?;
-                let session =
-                    harden::open_key_session(&server.host, server.port, &server.user, &key.private_path)
-                        .await?;
-                // Unharden may need a sudo password (Debian/Ubuntu default).
-                // Frontend typically passes the SSH password here as a sensible default.
-                harden::unharden(session, opts.sudo_password.as_deref()).await
-            })
-            .await;
-
-            match unharden_result {
-                Ok(()) => report.remote_unharden_succeeded = true,
-                Err(e @ AppError::HostKey(_)) => return Err(e),
-                Err(e) => {
-                    report.remote_unharden_error = Some(e.to_string());
+            let password = opts.password.as_deref().filter(|password| !password.is_empty());
+            match password {
+                // Key-only account: password login would not help, so leave the
+                // hardening in place and only revoke if another key remains.
+                None if opts.other_key_confirmed => {
+                    report.hardening_kept = server.hardened;
+                    let result = revoke::revoke_with_key_keeping_other(
+                        &server.host,
+                        server.port,
+                        &server.user,
+                        &key.private_path,
+                        &key.public_openssh,
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => report.remote_cleanup_succeeded = true,
+                        Err(e @ AppError::HostKey(_)) => return Err(e),
+                        Err(e) => {
+                            report.remote_cleanup_error = Some(e.to_string());
+                            return Ok(report);
+                        }
+                    }
+                }
+                None => {
+                    report.remote_cleanup_error = Some(
+                        "Vor dem Entfernen des SSH-Keys wird ein funktionierender Passwort-Login \
+                         oder ein anderer SSH-Key auf dem Server benötigt."
+                            .into(),
+                    );
                     return Ok(report);
                 }
-            }
-        }
+                Some(password) => {
+                    // Password auth is off on hardened servers, so undo the hardening
+                    // first. If the password then fails, restore the hardening.
+                    let mut unhardened = false;
+                    if server.hardened {
+                        report.remote_unharden_attempted = true;
+                        let unharden_result: AppResult<()> = async {
+                            let session = harden::open_key_session(
+                                &server.host,
+                                server.port,
+                                &server.user,
+                                &key.private_path,
+                            )
+                            .await?;
+                            harden::unharden(session, opts.sudo_password.as_deref()).await
+                        }
+                        .await;
+                        match unharden_result {
+                            Ok(()) => {
+                                report.remote_unharden_succeeded = true;
+                                unhardened = true;
+                            }
+                            Err(e @ AppError::HostKey(_)) => return Err(e),
+                            Err(e) => {
+                                report.remote_unharden_error = Some(e.to_string());
+                                return Ok(report);
+                            }
+                        }
+                    }
 
-        // Step B: remove the deployed public key from authorized_keys.
-        if let (Some(key), Some(password)) = (&assigned_key, password) {
-            report.remote_cleanup_attempted = true;
-            let result = revoke::revoke_with_password(
-                &server.host,
-                server.port,
-                &server.user,
-                password,
-                &key.public_openssh,
-            )
-            .await;
-            match result {
-                Ok(()) => report.remote_cleanup_succeeded = true,
-                Err(e @ AppError::HostKey(_)) => return Err(e),
-                Err(e) => {
-                    report.remote_cleanup_error = Some(e.to_string());
-                    return Ok(report);
+                    let result = revoke::revoke_with_password(
+                        &server.host,
+                        server.port,
+                        &server.user,
+                        password,
+                        &key.public_openssh,
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => report.remote_cleanup_succeeded = true,
+                        Err(e) => {
+                            if unhardened {
+                                match restore_hardening(&server, key, opts.sudo_password.as_deref()).await {
+                                    Ok(()) => report.hardening_restored = true,
+                                    Err(restore_error) => {
+                                        report.hardening_restore_error = Some(restore_error);
+                                        mark_unhardened(&state, opts.id).await?;
+                                    }
+                                }
+                            }
+                            if let AppError::HostKey(_) = e {
+                                return Err(e);
+                            }
+                            report.remote_cleanup_error = Some(e.to_string());
+                            return Ok(report);
+                        }
+                    }
                 }
             }
         }
