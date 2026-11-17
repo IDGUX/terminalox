@@ -35,15 +35,19 @@ You can remove unused keys from previously deleted server entries in the key man
 
 ## Features
 
-- Interactive SSH terminal with tabs and split panes (xterm.js, full PTY).
+- Interactive SSH terminal with tabs and split panes (xterm.js, full PTY, binary IPC channel).
 - SSH host-key verification using `~/.ssh/known_hosts`, with a fingerprint prompt for new keys.
-- Ed25519 key generation + import of existing keys.
+- Ed25519 key generation (optionally passphrase-protected) + import of existing keys, including encrypted ones.
+- Login via password, terminalox key or the running **ssh-agent** (OpenSSH agent, 1Password, Pageant …).
+- **Jump hosts** (like `ProxyJump`): any server entry can tunnel through another one, also for deploy, hardening and cleanup.
+- Passwords and key passphrases are asked once and can optionally be stored in the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service).
 - **One-click SSH hardening** and optional removal of the managed configuration during server cleanup.
+- **Key rotation**: new key is added and verified before the old one is revoked, so access is never lost.
 - Key management page with fingerprint, copy-public-to-clipboard, reverse-lookup ("which servers use this key").
-- Managed block in `~/.ssh/config` so the system `ssh` command works alongside the app.
-- Encrypted backup/restore (AES-256-GCM + Argon2id) for moving state between machines.
+- Managed block in `~/.ssh/config` so the system `ssh` command works alongside the app (unique aliases, `ProxyJump`); existing hosts can be **imported from `~/.ssh/config`**.
+- Encrypted backup/restore (AES-256-GCM + Argon2id) for moving state between machines. Imported entries are validated like manual input.
 - Pure Rust SSH stack (russh) — no OpenSSL dependency.
-- Minimal Tauri 2 capabilities: only `core`, `clipboard-manager:write-text`, `dialog:open/save`.
+- Minimal Tauri 2 capabilities: only `core`, `clipboard-manager:write-text`, `dialog:open/save` and `opener:open-url` restricted to `http(s)` links; strict Content Security Policy.
 
 ## Download
 
@@ -70,7 +74,7 @@ These builds are **not code-signed** yet (that costs money and an Apple/Microsof
 - Platform-specific:
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
   - **Windows:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) + [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (bundled with Windows 11)
-  - **Linux:** `libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential`
+  - **Linux:** `libwebkit2gtk-4.1-dev libdbus-1-dev pkg-config libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential`
 
 ### Steps
 
