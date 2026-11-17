@@ -107,7 +107,7 @@ pub async fn harden_server(
     };
 
     // Step 2: run the harden flow (drop-in + validate + reload + verify, with rollback).
-    let outcome = harden::harden(session, sudo_password.as_deref()).await?;
+    let outcome = harden::harden(session, (&host, port, &user, &key_path), sudo_password.as_deref()).await?;
     report.dropin_installed = outcome.dropin_installed;
     report.sshd_validated = outcome.sshd_validated;
     report.sshd_reloaded = outcome.sshd_reloaded;
@@ -140,8 +140,8 @@ pub async fn harden_server(
 pub struct VerifyHardenReport {
     pub dropin_present: bool,
     pub dropin_content_intact: bool,
-    /// `Some(true)` = `sshd -T` confirmed PasswordAuthentication is off.
-    /// `Some(false)` = drift! Server is no longer hardened on the wire.
+    /// `Some(true)` = both password methods are disabled for this connection.
+    /// `Some(false)` = at least one password method is enabled.
     /// `null` = couldn't determine (no sudo path).
     pub effective_password_auth_off: Option<bool>,
     pub effective_check_error: Option<String>,
@@ -188,7 +188,10 @@ pub async fn verify_server_hardening(
 
     // Persist the new state if it differs.
     let mut state_changed = false;
-    if is_hardened != was_hardened {
+    let can_update = !outcome.dropin_present
+        || !outcome.dropin_content_intact
+        || outcome.effective_password_auth_off.is_some();
+    if can_update && is_hardened != was_hardened {
         let mut store = state.store.write().await;
         if let Some(s) = store.find_server_mut(server_id) {
             s.hardened = is_hardened;
