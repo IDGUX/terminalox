@@ -376,21 +376,24 @@ fn build_unharden_script(sudo_password: Option<&str>) -> String {
     let prelude = privilege_prelude(sudo_password);
     format!(
         r#"bash -s <<'TERMINALOX_EOF'
-set -u
+set -u -o pipefail
 {prelude}
 
 # Remove our drop-in files (current + legacy path).
 for f in '{path}' '{legacy}'; do
-  if [ -f "$f" ]; then $SUDO rm -f "$f"; fi
+  if [ -f "$f" ]; then $SUDO rm -f "$f" || exit 1; fi
 done
 
 # If we previously added an Include directive, remove the marker block.
 if $SUDO grep -q '# BEGIN_TERMINALOX_INCLUDE' /etc/ssh/sshd_config 2>/dev/null; then
   $SUDO awk '/# BEGIN_TERMINALOX_INCLUDE/{{skip=1; next}} /# END_TERMINALOX_INCLUDE/{{skip=0; next}} !skip' /etc/ssh/sshd_config \
-    | $SUDO tee /etc/ssh/sshd_config.terminalox.new >/dev/null
-  $SUDO chmod 644 /etc/ssh/sshd_config.terminalox.new
-  $SUDO mv /etc/ssh/sshd_config.terminalox.new /etc/ssh/sshd_config
+    | $SUDO tee /etc/ssh/sshd_config.terminalox.new >/dev/null || exit 1
+  $SUDO chmod 644 /etc/ssh/sshd_config.terminalox.new || exit 1
+  $SUDO mv /etc/ssh/sshd_config.terminalox.new /etc/ssh/sshd_config || exit 1
 fi
+
+# Validate before attempting to reload the daemon.
+$SUDO sshd -t || exit 1
 
 # Reload sshd via whatever init system is available.
 for svc in ssh sshd; do $SUDO systemctl reload "$svc" 2>/dev/null && exit 0; done
@@ -399,9 +402,8 @@ for svc in sshd ssh; do
   $SUDO rc-service "$svc" reload 2>/dev/null && exit 0
   $SUDO rc-service "$svc" restart 2>/dev/null && exit 0
 done
-# If no reload worked, still report success — drop-ins are gone, new sshd
-# behavior will apply on the next config read.
-exit 0
+echo 'STEP:reload_failed' >&2
+exit 1
 TERMINALOX_EOF"#,
         prelude = prelude,
         path = DROPIN_PATH,
