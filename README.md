@@ -14,17 +14,24 @@ The use case this was built for: you SSH into a lot of boxes every day, but sett
 1. generates an Ed25519 keypair,
 2. pushes the public key into `~/.ssh/authorized_keys` on the server,
 3. verifies key-auth actually works,
-4. disables password-login server-side via a `/etc/ssh/sshd_config.d/99-terminalox.conf` drop-in,
+4. installs `/etc/ssh/sshd_config.d/00-terminalox.conf` to disable password and keyboard-interactive authentication,
 5. validates `sshd -t` + reloads sshd,
 6. confirms with `sshd -T` that password-auth is really off.
 
-Only if **all six steps** succeed is the server marked 🛡 *hardened*. Any failure triggers an automatic rollback. Deleting the server in the app reverses all of it (removes the drop-in, filters the key out of `authorized_keys`, deletes local key files).
+terminalox marks the server 🛡 *hardened* after successful key verification, configuration validation, reload, and a check of the effective password-authentication setting. The hardening script attempts to roll back its configuration changes if validation, reload, or that final check fails.
+
+## Remove a server entry
+
+- **Server already decommissioned** — Uncheck **SSH-Key auch vom Server entfernen** in the delete dialog. To also remove the associated key files from your computer, select **Zugehörigen privaten SSH-Key lokal löschen**. This works without an SSH connection. If another server entry uses the key, terminalox keeps it.
+- **Server still reachable** — Keep **SSH-Key auch vom Server entfernen** selected to remove the public key from the server. If the entry is marked as hardened, terminalox first attempts to undo its SSH configuration changes. It requires a successful password login over a fresh SSH connection before removing the public key. If remote cleanup fails, you can retry or choose **Nur lokal löschen** to remove the entry and keep the local key.
+
+You can remove unused keys from previously deleted server entries in the key management view.
 
 ## Features
 
 - Interactive SSH terminal (xterm.js, full PTY).
 - Ed25519 key generation + import of existing keys.
-- **One-click harden / unharden** (drop-in based, always reversible).
+- **One-click SSH hardening** and optional removal of the managed configuration during server cleanup.
 - Key management page with fingerprint, copy-public-to-clipboard, reverse-lookup ("which servers use this key").
 - Managed block in `~/.ssh/config` so the system `ssh` command works alongside the app.
 - Encrypted backup/restore (AES-256-GCM + Argon2id) for moving state between machines.
@@ -99,10 +106,10 @@ src-tauri/
 
 ## Security notes
 
-- Passwords are **never persisted** — used once for initial key deployment and for `sudo` during harden, then discarded.
+- Passwords are **never persisted**. terminalox uses them for SSH login during deployment and cleanup, or for `sudo` when changing the server configuration.
 - Private keys live as files under `~/.ssh/terminalox_<name>` with `0600` permissions. They are not encrypted at rest on the filesystem (the OS user account is the trust boundary).
 - Host-key verification is currently accept-any (TOFU + `known_hosts` is on the roadmap — do **not** use this on untrusted networks until that lands).
-- sshd-hardening writes to `/etc/ssh/sshd_config.d/99-terminalox.conf` exclusively; your `sshd_config` is never touched. Removing the app undoes the change.
+- SSH hardening installs `/etc/ssh/sshd_config.d/00-terminalox.conf` and may add a managed `Include` block to `/etc/ssh/sshd_config`. Uninstalling terminalox leaves the remote configuration in place.
 - Backups produced with a passphrase are AES-256-GCM with Argon2id (64 MiB, 3 iterations, 4 lanes). Plain-JSON backups are clearly flagged in the UI with a warning.
 
 ## Roadmap
