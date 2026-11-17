@@ -72,3 +72,42 @@ pub async fn revoke_with_password(
     client::auth_password(&mut session, user, password).await?;
     revoke_on_authenticated(session, public_key_openssh).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires the disposable OpenSSH server configured by CI"]
+    async fn revocation_requires_a_working_password_login() {
+        let host = "127.0.0.1";
+        let port = 22222;
+        let user = "terminalox-test";
+        let key_path = std::env::var("TERMINALOX_TEST_KEY").expect("path to test key");
+        let password = std::env::var("TERMINALOX_TEST_PASSWORD").expect("test account password");
+        let public_key = std::fs::read_to_string(format!("{key_path}.pub")).unwrap();
+
+        let rejected = revoke_with_password(host, port, user, "wrong password", &public_key).await;
+        assert!(matches!(rejected, Err(AppError::AuthFailed)));
+
+        let mut session = client::connect(host, port).await.unwrap();
+        client::auth_key(&mut session, user, &key_path)
+            .await
+            .expect("the key must still work after a rejected fallback login");
+        session
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await
+            .unwrap();
+
+        revoke_with_password(host, port, user, &password, &public_key)
+            .await
+            .expect("a working fallback login must allow key revocation");
+
+        let mut session = client::connect(host, port).await.unwrap();
+        let rejected = client::auth_key(&mut session, user, &key_path).await;
+        assert!(matches!(rejected, Err(AppError::AuthFailed)));
+        client::auth_password(&mut session, user, &password)
+            .await
+            .expect("the password must still work after revocation");
+    }
+}

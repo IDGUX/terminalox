@@ -33,6 +33,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            openssh-server \
             build-essential
 
       - name: Install frontend deps
@@ -44,6 +45,36 @@ jobs:
       - name: cargo check
         working-directory: src-tauri
         run: cargo check --all-targets
+
+      - name: Test key revocation against OpenSSH
+        working-directory: src-tauri
+        timeout-minutes: 15
+        run: |
+          fixture="$(mktemp -d)"
+          export TERMINALOX_TEST_KEY="$fixture/client"
+          export TERMINALOX_TEST_PASSWORD="$(openssl rand -hex 24)"
+          ssh-keygen -q -t ed25519 -N '' -f "$TERMINALOX_TEST_KEY"
+          ssh-keygen -q -t ed25519 -N '' -f "$fixture/host"
+          sudo useradd --create-home --shell /bin/bash terminalox-test
+          printf 'terminalox-test:%s\n' "$TERMINALOX_TEST_PASSWORD" | sudo chpasswd
+          sudo install -d -m 700 -o terminalox-test /home/terminalox-test/.ssh
+          sudo install -m 600 -o terminalox-test "$TERMINALOX_TEST_KEY.pub" /home/terminalox-test/.ssh/authorized_keys
+          sudo install -d -m 755 /run/sshd
+          cat > "$fixture/sshd_config" <<EOF
+          ListenAddress 127.0.0.1
+          Port 22222
+          HostKey $fixture/host
+          PidFile $fixture/sshd.pid
+          AllowUsers terminalox-test
+          PasswordAuthentication yes
+          PubkeyAuthentication yes
+          KbdInteractiveAuthentication no
+          AuthorizedKeysFile .ssh/authorized_keys
+          EOF
+          sudo /usr/sbin/sshd -f "$fixture/sshd_config" -E "$fixture/sshd.log"
+          mkdir -p "$HOME/.ssh"
+          printf '[127.0.0.1]:22222 %s\n' "$(cat "$fixture/host.pub")" >> "$HOME/.ssh/known_hosts"
+          cargo test --lib revocation_requires_a_working_password_login -- --ignored
 
       - name: cargo clippy
         working-directory: src-tauri
