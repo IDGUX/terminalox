@@ -9,13 +9,9 @@ use crate::ssh::client::{self, KnownHostsVerify};
 // `PasswordAuthentication yes`). sshd applies the *first* directive it
 // sees per keyword, so our file must be alphabetically first to win.
 pub const DROPIN_PATH: &str = "/etc/ssh/sshd_config.d/00-terminalox.conf";
-// Legacy path from earlier builds — still cleaned up on unharden for
-// forward compatibility with servers hardened by older app versions.
-const LEGACY_DROPIN_PATH: &str = "/etc/ssh/sshd_config.d/99-terminalox.conf";
-const DROPIN_CONTENT: &str = "# Managed by terminalox — do not edit.\n\
-                              # Removed automatically when the server is deleted from the app.\n\
-                              PasswordAuthentication no\n\
-                              KbdInteractiveAuthentication no\n";
+const TRANSACTION: &str = include_str!("harden_transaction.sh");
+const ROLLBACK_SECONDS: u64 = 120;
+const SSH_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 
 /// How the remote session can elevate to root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -47,14 +43,12 @@ pub struct HardenOutcome {
     pub sshd_reloaded: bool,
     pub password_auth_confirmed_disabled: bool,
     pub stderr: String,
+    committed: bool,
 }
 
 impl HardenOutcome {
     pub fn all_ok(&self) -> bool {
-        self.dropin_installed
-            && self.sshd_validated
-            && self.sshd_reloaded
-            && self.password_auth_confirmed_disabled
+        self.committed
     }
 }
 
@@ -67,7 +61,11 @@ pub async fn probe_readiness(
 ) -> AppResult<HardenReadiness> {
     // Emit structured lines; capture sudo -n's stderr into a base64-encoded line
     // so we can inspect it without worrying about newlines / escaping.
-    let script = r#"echo "UID:$(id -u)"
+    let script = r#"if command -v systemd-run >/dev/null && command -v flock >/dev/null &&
+    (systemctl is-active --quiet ssh.service || systemctl is-active --quiet sshd.service); then
+    echo "ROLLBACK:available"
+fi
+echo "UID:$(id -u)"
 if ! command -v sudo >/dev/null 2>&1; then
   echo "SUDO:missing"
 else
@@ -82,6 +80,11 @@ else
 fi
 "#;
     let (_exit, stdout, _stderr) = exec_collect(session, script, "").await?;
+    if !stdout.lines().any(|line| line == "ROLLBACK:available") {
+        return Ok(HardenReadiness::Unavailable {
+            reason: "Die Härtung benötigt einen laufenden systemd-SSH-Dienst und einen serverseitigen Rollback-Timer.".into(),
+        });
+    }
 
     let mut uid: Option<u32> = None;
     let mut sudo: Option<String> = None;
@@ -152,44 +155,128 @@ fi
     }
 }
 
-/// Run the hardening flow over an authenticated session. The password (if any)
-/// is embedded base64-encoded into the script itself — the script then
-/// primes sudo's credential cache via an internal heredoc and uses `sudo -n`
-/// for the rest. Everything happens in a single channel = single TTY, so the
-/// credential cache stays valid throughout. Self-rolls-back on any failure.
+/// Apply independently of the client, then confirm over a newly authenticated connection.
 pub async fn harden(
     session: russh::client::Handle<KnownHostsVerify>,
+    target: (&str, u16, &str, &str),
     sudo_password: Option<&str>,
 ) -> AppResult<HardenOutcome> {
-    let script = build_harden_script(sudo_password);
-    let (exit, stdout, stderr) = exec_collect(session, &script, "").await?;
+    let token = uuid::Uuid::new_v4();
+    let password = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
+    let apply = build_transaction_command("apply", token, ROLLBACK_SECONDS);
+    let rollback_notice = "Solange die Änderung unbestätigt ist, bleibt der automatische Rollback aktiv.";
+    let (exit, stdout, stderr) =
+        match tokio::time::timeout(SSH_STEP_TIMEOUT, exec_collect(session, &apply, &password)).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                return Ok(HardenOutcome {
+                    stderr: format!("{error}. {rollback_notice}"),
+                    ..Default::default()
+                });
+            }
+            Err(_) => {
+                return Ok(HardenOutcome {
+                    stderr: format!("SSH-Härtung hat das Zeitlimit überschritten. {rollback_notice}"),
+                    ..Default::default()
+                });
+            }
+        };
+    let mut outcome = parse_harden_stdout(&stdout, stderr);
+    if exit != 0 || !outcome.dropin_installed || !outcome.sshd_validated || !outcome.sshd_reloaded {
+        outcome.stderr = format!("exit {exit}: {}. {rollback_notice}", outcome.stderr.trim());
+        return Ok(outcome);
+    }
 
-    let outcome = parse_harden_stdout(&stdout, stderr.clone());
-
-    if exit != 0 && !outcome.all_ok() {
-        return Ok(HardenOutcome {
-            stderr: format!("exit {exit}: {stderr}"),
-            ..outcome
-        });
+    let (host, port, user, key_path) = target;
+    let confirmation = async {
+        let fresh = connect_after_reload(host, port, user, key_path).await?;
+        let confirm = build_transaction_command("confirm", token, ROLLBACK_SECONDS);
+        let (exit, stdout, stderr) = exec_collect(fresh, &confirm, &password).await?;
+        if exit != 0 || !stdout.lines().any(|line| line.trim() == "STEP:password_auth_off") {
+            return Err(AppError::RemoteCommandFailed(format!("exit {exit}: {stderr}")));
+        }
+        Ok::<_, AppError>(())
+    };
+    match tokio::time::timeout(SSH_STEP_TIMEOUT, confirmation).await {
+        Ok(Ok(())) => {
+            outcome.password_auth_confirmed_disabled = true;
+            outcome.committed = true;
+        }
+        Ok(Err(error)) => {
+            outcome.stderr = format!(
+                "Bestätigung über neue SSH-Verbindung fehlgeschlagen: {error}. {rollback_notice}"
+            );
+        }
+        Err(_) => {
+            outcome.stderr = format!(
+                "Bestätigung über neue SSH-Verbindung hat das Zeitlimit überschritten. {rollback_notice}"
+            );
+        }
     }
     Ok(outcome)
 }
 
-/// Re-check the live hardening state on the remote.
-/// Read-only; never writes to the server. Combines:
-///   1. drop-in file present at the expected path
-///   2. drop-in content still contains `PasswordAuthentication no`
-///   3. (when sudo is available) `sshd -T` confirms effective `PasswordAuthentication no`
-/// The third check is the ground truth; the first two are cheap and
-/// don't require privileges, so we always do them and surface them
-/// separately for clear diagnostics.
+async fn connect_after_reload(
+    host: &str,
+    port: u16,
+    user: &str,
+    key_path: &str,
+) -> AppResult<russh::client::Handle<KnownHostsVerify>> {
+    use russh::{client::AuthResult, MethodKind};
+
+    let probe = || async {
+        let mut session = client::connect(host, port).await?;
+        match session.authenticate_none(user).await? {
+            AuthResult::Failure { remaining_methods, .. }
+                if !remaining_methods.contains(&MethodKind::Password)
+                    && !remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
+            _ => {
+                return Err(AppError::Other(
+                    "Die neue SSH-Verbindung bietet weiterhin Passwortverfahren an oder verlangt keine Authentifizierung.".into(),
+                ));
+            }
+        }
+        client::auth_key(&mut session, user, key_path).await?;
+        Ok(session)
+    };
+
+    // systemctl reports completion when the daemon is signalled; the
+    // listener may briefly stop accepting connections while it re-execs.
+    for pause in [250, 500, 1000] {
+        match probe().await {
+            Ok(session) => return Ok(session),
+            Err(error @ AppError::HostKey(_)) => return Err(error),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(pause)).await,
+        }
+    }
+    probe().await
+}
+
+/// Inspect both password methods for this session without changing sshd.
 pub async fn verify(
     session: russh::client::Handle<KnownHostsVerify>,
     sudo_password: Option<&str>,
 ) -> AppResult<VerifyOutcome> {
-    let script = build_verify_script(sudo_password);
-    let (_exit, stdout, _stderr) = exec_collect(session, &script, "").await?;
-    Ok(parse_verify_stdout(&stdout))
+    let file_check = format!(
+        r#"if [ -f '{DROPIN_PATH}' ]; then
+    printf '%s\n' 'DROPIN:present'
+    if grep -qiE '^[[:space:]]*PasswordAuthentication[[:space:]]+no[[:space:]]*$' '{DROPIN_PATH}' &&
+       grep -qiE '^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+no[[:space:]]*$' '{DROPIN_PATH}'; then
+        printf '%s\n' 'DROPIN_CONTENT:intact'
+    fi
+fi
+"#
+    );
+    let command = build_transaction_command("verify", uuid::Uuid::nil(), 0);
+    let password = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
+    let (exit, stdout, stderr) =
+        exec_collect(session, &(file_check + &command), &password).await?;
+    let mut outcome = parse_verify_stdout(&stdout);
+    if exit != 0 {
+        outcome.effective_password_auth_off = None;
+        outcome.effective_check_error = Some(stderr.trim().to_string());
+    }
+    Ok(outcome)
 }
 
 #[derive(Default, Debug, Clone)]
@@ -204,15 +291,10 @@ pub struct VerifyOutcome {
 }
 
 impl VerifyOutcome {
-    /// Conservative verdict: prefer the effective check when present, otherwise
-    /// trust the drop-in file. Either signal showing "not hardened" wins.
     pub fn is_hardened(&self) -> bool {
-        if self.effective_password_auth_off == Some(false) {
-            return false;
-        }
         self.dropin_present
             && self.dropin_content_intact
-            && self.effective_password_auth_off != Some(false)
+            && self.effective_password_auth_off == Some(true)
     }
 }
 
@@ -220,8 +302,9 @@ pub async fn unharden(
     session: russh::client::Handle<KnownHostsVerify>,
     sudo_password: Option<&str>,
 ) -> AppResult<()> {
-    let script = build_unharden_script(sudo_password);
-    let (exit, _stdout, stderr) = exec_collect(session, &script, "").await?;
+    let command = build_transaction_command("unharden", uuid::Uuid::nil(), 0);
+    let password = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
+    let (exit, _stdout, stderr) = exec_collect(session, &command, &password).await?;
     if exit != 0 {
         return Err(AppError::RemoteCommandFailed(format!(
             "unharden exit {exit}: {stderr}"
@@ -230,253 +313,24 @@ pub async fn unharden(
     Ok(())
 }
 
-/// Emit a shell prelude that sets `$SUDO` for the rest of the script.
-/// The prelude may inline a (base64-encoded) sudo password — if so, it
-/// primes sudo's credential cache in-script via an internal heredoc.
-/// This keeps everything in one TTY/channel, avoiding tty_tickets cache
-/// invalidation between channels.
-/// Exits: 20 = no privilege path, 21 = password was needed but wrong/missing.
-fn privilege_prelude(sudo_password: Option<&str>) -> String {
-    // Base64 empty string if no password — the script then treats it as absent.
-    let pw_b64 = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
+fn build_transaction_command(action: &str, token: uuid::Uuid, delay: u64) -> String {
+    let script = TRANSACTION.replace('\'', "'\\''");
     format!(
-        r#"SUDO_PW_B64='{pw_b64}'
+        r#"program='{script}'
+set -- -c "$program" terminalox '{action}' '{token}' "${{SSH_CONNECTION:-}}" "$(id -un)" '{delay}'
 if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-elif command -v sudo >/dev/null 2>&1; then
-  if sudo -n true 2>/dev/null; then
-    SUDO="sudo -n"
-  elif [ -n "$SUDO_PW_B64" ]; then
-    __SUDO_PW=$(printf '%s' "$SUDO_PW_B64" | base64 -d)
-    if ! sudo -S -p '' -v 2>/dev/null <<EOF_PW
-$__SUDO_PW
-EOF_PW
-    then
-      unset __SUDO_PW SUDO_PW_B64
-      echo 'STEP:sudo_auth_failed' >&2
-      exit 21
-    fi
-    unset __SUDO_PW SUDO_PW_B64
-    SUDO="sudo -n"
-  else
-    echo 'STEP:sudo_password_required' >&2
-    exit 21
-  fi
+    exec /bin/bash "$@"
+elif ! command -v sudo >/dev/null; then
+    echo 'STEP:no_privilege' >&2
+    exit 20
+fi
+IFS= read -r password || true
+if [ -n "$password" ]; then
+    {{ printf '%s' "$password" | base64 -d; printf '\n'; }} |
+        sudo -k -S -p '' -- /bin/bash "$@" || exit $?
 else
-  echo 'STEP:no_privilege' >&2
-  exit 20
-fi
-"#
-    )
-}
-
-fn build_harden_script(sudo_password: Option<&str>) -> String {
-    let content_b64 = BASE64_STANDARD.encode(DROPIN_CONTENT);
-    let prelude = privilege_prelude(sudo_password);
-    format!(
-        r#"bash -s <<'TERMINALOX_EOF'
-set -u
-{prelude}
-DROPIN='{path}'
-STAGE="$DROPIN.terminalox.new"
-INCLUDE_WAS_ADDED=0
-
-# --- Reload sshd. Tries systemd, SysV-init, and OpenRC. -------------------
-reload_sshd() {{
-  for svc in ssh sshd; do
-    if $SUDO systemctl reload "$svc" 2>/dev/null; then return 0; fi
-  done
-  for svc in ssh sshd; do
-    if $SUDO service "$svc" reload 2>/dev/null; then return 0; fi
-  done
-  # OpenRC (Alpine/Gentoo). Reload action may be absent → try restart.
-  for svc in sshd ssh; do
-    if $SUDO rc-service "$svc" reload 2>/dev/null; then return 0; fi
-    if $SUDO rc-service "$svc" restart 2>/dev/null; then return 0; fi
-  done
-  return 1
-}}
-
-# --- Revert the include marker block we may have appended. ---------------
-revert_include() {{
-  if [ "$INCLUDE_WAS_ADDED" -ne 1 ]; then return 0; fi
-  $SUDO awk '/# BEGIN_TERMINALOX_INCLUDE/{{skip=1; next}} /# END_TERMINALOX_INCLUDE/{{skip=0; next}} !skip' /etc/ssh/sshd_config \
-    | $SUDO tee /etc/ssh/sshd_config.terminalox.new >/dev/null
-  $SUDO chmod 644 /etc/ssh/sshd_config.terminalox.new
-  $SUDO mv /etc/ssh/sshd_config.terminalox.new /etc/ssh/sshd_config
-}}
-
-# --- Full rollback: drop-in away, include marker away, reload. ------------
-rollback() {{
-  $SUDO rm -f "$DROPIN"
-  revert_include
-  reload_sshd >/dev/null 2>&1 || true
-}}
-
-# Step 0: ensure the drop-in directory is honored by sshd.
-# Modern distros (Debian 11+, Ubuntu 20.04+, Fedora, RHEL/Rocky/Alma 8+)
-# include /etc/ssh/sshd_config.d/*.conf out of the box. Older or custom
-# sshd_config files may lack the Include directive — without it, our
-# drop-in is silently ignored.
-if ! $SUDO grep -qE '^[[:space:]]*Include[[:space:]]+.*sshd_config\.d' /etc/ssh/sshd_config 2>/dev/null; then
-  if ! $SUDO grep -q '# BEGIN_TERMINALOX_INCLUDE' /etc/ssh/sshd_config 2>/dev/null; then
-    if $SUDO tee -a /etc/ssh/sshd_config >/dev/null <<EOF_INC
-
-# BEGIN_TERMINALOX_INCLUDE
-# Added by terminalox so /etc/ssh/sshd_config.d/*.conf is honored.
-# Removed automatically when the server is unhardened.
-Include /etc/ssh/sshd_config.d/*.conf
-# END_TERMINALOX_INCLUDE
-EOF_INC
-    then
-      INCLUDE_WAS_ADDED=1
-      echo 'STEP:include_added'
-    fi
-  fi
-fi
-
-$SUDO mkdir -p /etc/ssh/sshd_config.d
-echo '{content}' | base64 -d | $SUDO tee "$STAGE" >/dev/null
-$SUDO chmod 644 "$STAGE"
-# Activate drop-in
-$SUDO mv "$STAGE" "$DROPIN"
-echo 'STEP:dropin_installed'
-
-# Validate full sshd config (drop-in + maybe new include).
-if ! $SUDO sshd -t 2>&1; then
-  rollback
-  echo 'STEP:validation_failed' >&2
-  exit 2
-fi
-echo 'STEP:sshd_validated'
-
-if ! reload_sshd; then
-  rollback
-  echo 'STEP:reload_failed' >&2
-  exit 3
-fi
-echo 'STEP:sshd_reloaded'
-
-# Verify effective config — ground truth.
-if $SUDO sshd -T 2>/dev/null | grep -qiE '^passwordauthentication no'; then
-  echo 'STEP:password_auth_off'
-else
-  rollback
-  echo 'STEP:password_auth_verify_failed' >&2
-  exit 4
-fi
-TERMINALOX_EOF"#,
-        prelude = prelude,
-        path = DROPIN_PATH,
-        content = content_b64
-    )
-}
-
-fn build_unharden_script(sudo_password: Option<&str>) -> String {
-    let prelude = privilege_prelude(sudo_password);
-    format!(
-        r#"bash -s <<'TERMINALOX_EOF'
-set -u -o pipefail
-{prelude}
-
-# Remove our drop-in files (current + legacy path).
-for f in '{path}' '{legacy}'; do
-  if [ -f "$f" ]; then $SUDO rm -f "$f" || exit 1; fi
-done
-
-# If we previously added an Include directive, remove the marker block.
-if $SUDO grep -q '# BEGIN_TERMINALOX_INCLUDE' /etc/ssh/sshd_config 2>/dev/null; then
-  $SUDO awk '/# BEGIN_TERMINALOX_INCLUDE/{{skip=1; next}} /# END_TERMINALOX_INCLUDE/{{skip=0; next}} !skip' /etc/ssh/sshd_config \
-    | $SUDO tee /etc/ssh/sshd_config.terminalox.new >/dev/null || exit 1
-  $SUDO chmod 644 /etc/ssh/sshd_config.terminalox.new || exit 1
-  $SUDO mv /etc/ssh/sshd_config.terminalox.new /etc/ssh/sshd_config || exit 1
-fi
-
-# Validate before attempting to reload the daemon.
-$SUDO sshd -t || exit 1
-
-# Reload sshd via whatever init system is available.
-for svc in ssh sshd; do $SUDO systemctl reload "$svc" 2>/dev/null && exit 0; done
-for svc in ssh sshd; do $SUDO service "$svc" reload 2>/dev/null && exit 0; done
-for svc in sshd ssh; do
-  $SUDO rc-service "$svc" reload 2>/dev/null && exit 0
-  $SUDO rc-service "$svc" restart 2>/dev/null && exit 0
-done
-echo 'STEP:reload_failed' >&2
-exit 1
-TERMINALOX_EOF"#,
-        prelude = prelude,
-        path = DROPIN_PATH,
-        legacy = LEGACY_DROPIN_PATH
-    )
-}
-
-/// Verify script. Stays read-only and survives missing sudo:
-///   - File check via `test -f` + content grep run unprivileged
-///   - `sshd -T` is best-effort: if no privilege path, we just skip it
-fn build_verify_script(sudo_password: Option<&str>) -> String {
-    // We DON'T want the prelude to hard-exit if no sudo — verify must keep
-    // running even on a non-sudo user. Build a softer variant inline.
-    let pw_b64 = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
-    format!(
-        r#"bash -s <<'TERMINALOX_EOF'
-set -u
-DROPIN='{path}'
-
-# 1) Drop-in file
-if [ -f "$DROPIN" ]; then
-  echo 'DROPIN:present'
-  if grep -qiE '^[[:space:]]*PasswordAuthentication[[:space:]]+no[[:space:]]*$' "$DROPIN" 2>/dev/null; then
-    echo 'DROPIN_CONTENT:intact'
-  else
-    echo 'DROPIN_CONTENT:tampered'
-  fi
-else
-  echo 'DROPIN:missing'
-fi
-
-# 2) Effective sshd config — best effort, needs root/sudo
-SUDO_PW_B64='{pw_b64}'
-HAVE_PRIV=0
-SUDO_VERIFY=""
-if [ "$(id -u)" -eq 0 ]; then
-  HAVE_PRIV=1
-elif command -v sudo >/dev/null 2>&1; then
-  if sudo -n true 2>/dev/null; then
-    HAVE_PRIV=1
-    SUDO_VERIFY="sudo -n"
-  elif [ -n "$SUDO_PW_B64" ]; then
-    __SUDO_PW=$(printf '%s' "$SUDO_PW_B64" | base64 -d)
-    if sudo -S -p '' -v 2>/dev/null <<EOF_PW
-$__SUDO_PW
-EOF_PW
-    then
-      HAVE_PRIV=1
-      SUDO_VERIFY="sudo -n"
-    else
-      echo 'EFFECTIVE:skipped:sudo_auth_failed'
-    fi
-    unset __SUDO_PW SUDO_PW_B64
-  else
-    echo 'EFFECTIVE:skipped:needs_sudo_password'
-  fi
-else
-  echo 'EFFECTIVE:skipped:no_sudo'
-fi
-
-if [ "$HAVE_PRIV" -eq 1 ]; then
-  effective=$($SUDO_VERIFY sshd -T 2>/dev/null | awk 'tolower($1)=="passwordauthentication"{{print tolower($2); exit}}')
-  if [ -z "$effective" ]; then
-    echo 'EFFECTIVE:unknown'
-  elif [ "$effective" = "no" ]; then
-    echo 'EFFECTIVE:off'
-  else
-    echo "EFFECTIVE:on:$effective"
-  fi
-fi
-TERMINALOX_EOF"#,
-        path = DROPIN_PATH,
-        pw_b64 = pw_b64
+    exec sudo -n -- /bin/bash "$@"
+fi"#
     )
 }
 
@@ -575,4 +429,75 @@ pub async fn open_key_session(
     let mut session = client::connect(host, port).await?;
     client::auth_key(&mut session, user, key_path).await?;
     Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    #[ignore = "requires the disposable systemd OpenSSH server configured by CI"]
+    async fn hardening_restores_config_without_confirmation_and_commits_after_reconnect() {
+        let host = "127.0.0.1";
+        let port = 22222;
+        let user = "terminalox-test";
+        let key = std::env::var("TERMINALOX_TEST_KEY").unwrap();
+        let password = std::env::var("TERMINALOX_TEST_PASSWORD").unwrap();
+        let ssh_config = "/etc/ssh/sshd_config";
+        let original_config = std::fs::read(ssh_config).unwrap();
+        let original_dropin = std::fs::read(DROPIN_PATH).unwrap();
+
+        let session = open_key_session(host, port, user, &key).await.unwrap();
+        let mut channel = session.channel_open_session().await.unwrap();
+        let apply = build_transaction_command("apply", uuid::Uuid::new_v4(), 10);
+        channel.exec(true, apply.as_bytes()).await.unwrap();
+        let input = BASE64_STANDARD.encode(&password);
+        channel.data(input.as_bytes()).await.unwrap();
+        channel.eof().await.unwrap();
+        let mut output = Vec::new();
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    output.extend_from_slice(&data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    assert_eq!(exit_status, 0, "{}", String::from_utf8_lossy(&output));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("STEP:sshd_reloaded"));
+        // Lose the SSH transport before the client sends a commit.
+        drop(channel);
+        drop(session);
+
+        let hardened_session = connect_after_reload(host, port, user, &key).await.unwrap();
+        drop(hardened_session);
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let password_works = match client::connect(host, port).await {
+                    Ok(mut fresh) => client::auth_password(&mut fresh, user, &password).await.is_ok(),
+                    Err(_) => false,
+                };
+                if password_works && !std::fs::exists("/etc/ssh/.terminalox-pending").unwrap() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        })
+        .await
+        .expect("the timer should restore password login after losing the transport");
+        assert_eq!(std::fs::read(ssh_config).unwrap(), original_config);
+        assert_eq!(std::fs::read(DROPIN_PATH).unwrap(), original_dropin);
+
+        let session = open_key_session(host, port, user, &key).await.unwrap();
+        let outcome = harden(session, (host, port, user, &key), Some(&password))
+            .await
+            .unwrap();
+        assert!(outcome.all_ok(), "{outcome:?}");
+        assert!(!std::fs::exists("/etc/ssh/.terminalox-pending").unwrap());
+    }
 }

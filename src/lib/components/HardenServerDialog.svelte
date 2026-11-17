@@ -61,11 +61,10 @@
     {#if !report}
       <h3>{server.name} härten</h3>
       <p class="hint">
-        Setzt <code>PasswordAuthentication no</code> via Drop-in
-        <code>/etc/ssh/sshd_config.d/00-terminalox.conf</code>, validiert mit
-        <code>sshd -t</code>, reloaded <code>sshd</code> und verifiziert mit
-        <code>sshd -T</code>. Pre-Flight hat geprüft, dass Key-Auth läuft — du kannst dich
-        nicht aussperren. Bei jedem Fehler: vollständiger Rollback.
+        Deaktiviert die Passwort- und Keyboard-Interactive-Anmeldung. Nach dem Reload
+        prüft terminalox den Schlüssel-Login über eine neue SSH-Verbindung. Fehlt die
+        Bestätigung, versucht der Server nach zwei Minuten, die vorherige SSH-Konfiguration
+        wiederherzustellen.
       </p>
 
       <p class="method">✓ {methodLabel(readiness.method)}</p>
@@ -80,7 +79,7 @@
             autofocus
             autocomplete="current-password"
           />
-          <span class="hint">Einmalig für <code>sudo -v</code>, wird nicht gespeichert.</span>
+          <span class="hint">Wird für die Änderung und ihre Bestätigung verwendet.</span>
         </label>
       {/if}
 
@@ -116,7 +115,7 @@
         </li>
         <li class:ok={report.passwordAuthConfirmedDisabled}>
           {stepIcon(report.passwordAuthConfirmedDisabled)}
-          <code>sshd -T</code> bestätigt Passwort-Login ist aus
+          Neuer Schlüssel-Login bestätigt, beide Passwortverfahren sind deaktiviert
         </li>
       </ul>
 
@@ -129,12 +128,7 @@
       {/if}
 
       {#if report.hardened}
-        <p class="success">Server ist jetzt abgesichert: nur noch Key-Login möglich.</p>
-      {:else}
-        <p class="warning-box">
-          Rollback hat stattgefunden — Passwort-Login ist wieder so wie vorher.
-          Key-Auth funktioniert weiter.
-        </p>
+        <p class="success">Die SSH-Härtung wurde bestätigt.</p>
       {/if}
 
       <div class="buttons">
@@ -198,14 +192,6 @@
 
   .warnings { margin: 10px 0; }
   .warning { color: #fbbf24; font-size: 12px; margin: 4px 0; line-height: 1.4; }
-  .warning-box {
-    background: #2d1f12;
-    color: #fbbf24;
-    padding: 10px;
-    border-radius: 6px;
-    font-size: 13px;
-    line-height: 1.4;
-  }
   .success {
     background: #052e26;
     color: #34d399;

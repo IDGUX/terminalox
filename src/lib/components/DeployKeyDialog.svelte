@@ -156,7 +156,7 @@
 
       {#if report.hardened}
         <p class="success">
-          Server ist abgesichert: nur noch Key-Login möglich.
+          Neuer Schlüssel-Login bestätigt. Beide Passwortverfahren sind für diese Verbindung deaktiviert.
           Beim Löschen in der App wird das automatisch zurückgesetzt.
         </p>
       {:else if report.keyDeployed}
