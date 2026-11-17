@@ -61,8 +61,8 @@
     <p class="hint">
       Wähle einen bestehenden Private Key (z.B. <code>~/.ssh/id_ed25519</code>). Die Datei
       wird nach <code>~/.ssh/terminalox_imported_&lt;name&gt;</code> kopiert und im Store
-      registriert. <strong>Das Original bleibt unangetastet.</strong> Verschlüsselte Keys
-      (mit Passphrase) werden noch nicht unterstützt.
+      registriert. <strong>Das Original bleibt unangetastet.</strong> Keys mit Passphrase
+      bleiben verschlüsselt; die Passphrase wird beim ersten Verbinden abgefragt.
     </p>
 
     <label>

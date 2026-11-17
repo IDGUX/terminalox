@@ -12,6 +12,9 @@
   import BackupDialog from "$lib/components/BackupDialog.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
   import HostKeyDialog from "$lib/components/HostKeyDialog.svelte";
+  import SecretDialog from "$lib/components/SecretDialog.svelte";
+  import RotateKeyDialog from "$lib/components/RotateKeyDialog.svelte";
+  import ConfigImportDialog from "$lib/components/ConfigImportDialog.svelte";
   import { app } from "$lib/stores/app.svelte";
   import type { HardenReadiness, Server, Uuid } from "$lib/types";
 
@@ -24,6 +27,8 @@
   >(null);
   let deleteFor = $state<Server | null>(null);
   let backupMode = $state<"export" | "import" | null>(null);
+  let rotateFor = $state<Server | null>(null);
+  let configImport = $state(false);
   let loadError = $state<string | null>(null);
 
   onMount(async () => {
@@ -49,8 +54,10 @@
         onDeploy={(s) => (deployFor = s)}
         onHarden={(s, r) => (hardenFor = { server: s, readiness: r })}
         onDelete={(s) => (deleteFor = s)}
+        onRotate={(s) => (rotateFor = s)}
         onExport={() => (backupMode = "export")}
         onImport={() => (backupMode = "import")}
+        onImportConfig={() => (configImport = true)}
       />
       <main class="main">
         {#if app.selectedServer}
@@ -62,7 +69,8 @@
             <h1>Servers</h1>
             <p>Wähle einen Server links, oder füge einen neuen hinzu (<strong>+</strong>).</p>
             <p class="small">
-              Workflow: Server hinzufügen → einmal mit Passwort verbinden →
+              Workflow: Server hinzufügen (oder aus <code>~/.ssh/config</code> importieren) →
+              einmal mit Passwort verbinden →
               „SSH-Key deployen + Härten" → ab jetzt ohne Passwort,
               Passwort-Login serverseitig aus.
             </p>
@@ -101,7 +109,15 @@
     <BackupDialog mode={backupMode} onClose={() => (backupMode = null)} />
   {/if}
 
+  {#if rotateFor}
+    <RotateKeyDialog server={rotateFor} onClose={() => (rotateFor = null)} />
+  {/if}
+  {#if configImport}
+    <ConfigImportDialog onClose={() => (configImport = false)} />
+  {/if}
+
   <HostKeyDialog />
+  <SecretDialog />
   <Toasts />
 </div>
 

@@ -3,6 +3,7 @@
   import { toast } from "$lib/stores/toast.svelte";
   import type { AuthMode, Server, Uuid } from "$lib/types";
   import ColorPicker from "./ColorPicker.svelte";
+  import JumpHostSelect from "./JumpHostSelect.svelte";
 
   let {
     onClose,
@@ -19,10 +20,11 @@
   let host = $state(template?.host ?? "");
   let port = $state(template?.port ?? 22);
   let user = $state(template?.user ?? "");
-  let authMode = $state<"password" | "key">(template?.auth.mode ?? "password");
+  let authMode = $state<AuthMode["mode"]>(template?.auth.mode ?? "password");
   let keyId = $state<Uuid | "">(template?.auth.mode === "key" ? template.auth.key_id : "");
   let folderId = $state<Uuid | "">(template?.folder_id ?? initialFolderId ?? "");
   let color = $state<string | null>(template?.color ?? null);
+  let jumpId = $state<Uuid | "">(template?.jump_server_id ?? "");
   let submitting = $state(false);
   let error = $state<string | null>(null);
 
@@ -45,6 +47,8 @@
         return;
       }
       auth = { mode: "key", key_id: keyId };
+    } else if (authMode === "agent") {
+      auth = { mode: "agent" };
     } else {
       auth = { mode: "password" };
     }
@@ -58,6 +62,7 @@
         auth,
         color,
         folder_id: folderId || null,
+        jump_server_id: jumpId || null,
       });
       toast.success(`Server „${s.name}" hinzugefügt`);
       onClose();
@@ -108,6 +113,8 @@
       </label>
     {/if}
 
+    <JumpHostSelect bind:value={jumpId} excludeId={null} />
+
     <div class="color-field">
       Farbe
       <ColorPicker bind:value={color} />
@@ -123,12 +130,21 @@
         <input type="radio" name="auth" value="key" bind:group={authMode} />
         <span>Bestehender Key</span>
       </label>
+      <label class="radio" title="Keys aus dem laufenden ssh-agent (OpenSSH, 1Password, Pageant …)">
+        <input type="radio" name="auth" value="agent" bind:group={authMode} />
+        <span>ssh-agent</span>
+      </label>
     </fieldset>
 
     {#if authMode === "password"}
       <p class="hint">
         Für die erste Verbindung mit Passwort. Danach kannst du mit einem Klick
         einen SSH-Key deployen und die App schaltet auf Key-Auth um.
+      </p>
+    {:else if authMode === "agent"}
+      <p class="hint">
+        Login mit den Keys des laufenden ssh-agents (z.B. 1Password, Secretive,
+        <code>ssh-add</code>). terminalox speichert dafür keinen Key.
       </p>
     {:else if keys.length === 0}
       <p class="hint warn">

@@ -4,6 +4,7 @@
   import { toast } from "$lib/stores/toast.svelte";
   import type { AuthMode, Server, Uuid } from "$lib/types";
   import ColorPicker from "./ColorPicker.svelte";
+  import JumpHostSelect from "./JumpHostSelect.svelte";
 
   let { server, onClose }: { server: Server; onClose: () => void } = $props();
 
@@ -11,12 +12,13 @@
   let host = $state(server.host);
   let port = $state(server.port);
   let user = $state(server.user);
-  let authMode = $state<"password" | "key">(server.auth.mode);
+  let authMode = $state<AuthMode["mode"]>(server.auth.mode);
   let keyId = $state<Uuid | "">(
     server.auth.mode === "key" ? server.auth.key_id : "",
   );
   let folderId = $state<Uuid | "">(server.folder_id ?? "");
   let color = $state<string | null>(server.color ?? null);
+  let jumpId = $state<Uuid | "">(server.jump_server_id ?? "");
   let submitting = $state(false);
   let error = $state<string | null>(null);
 
@@ -31,9 +33,9 @@
   });
 
   function authChanged(): AuthMode | null {
-    if (authMode === "password") {
-      if (originalAuth.mode === "password") return null;
-      return { mode: "password" };
+    if (authMode === "password" || authMode === "agent") {
+      if (originalAuth.mode === authMode) return null;
+      return { mode: authMode };
     }
     if (!keyId) return null;
     if (originalAuth.mode === "key" && originalAuth.key_id === keyId)
@@ -59,6 +61,9 @@
         user: user.trim(),
         color,
         ...(auth ? { auth } : {}),
+        ...((jumpId || null) !== (server.jump_server_id ?? null)
+          ? { jump_server_id: jumpId || null }
+          : {}),
       });
       app.servers = app.servers.map((s) => (s.id === updated.id ? updated : s));
       if ((folderId || null) !== (server.folder_id ?? null)) {
@@ -114,6 +119,8 @@
       </label>
     {/if}
 
+    <JumpHostSelect bind:value={jumpId} excludeId={server.id} />
+
     <div class="color-field">
       Farbe
       <ColorPicker bind:value={color} />
@@ -128,6 +135,10 @@
       <label class="radio">
         <input type="radio" name="auth" value="key" bind:group={authMode} />
         <span>Bestehender Key</span>
+      </label>
+      <label class="radio" title="Keys aus dem laufenden ssh-agent (OpenSSH, 1Password, Pageant …)">
+        <input type="radio" name="auth" value="agent" bind:group={authMode} />
+        <span>ssh-agent</span>
       </label>
     </fieldset>
 
@@ -152,6 +163,11 @@
           Verbindung fehl.
         </p>
       {/if}
+    {:else if authMode === "agent"}
+      <p class="hint">
+        Login mit den Keys des laufenden ssh-agents (z.B. 1Password, Secretive,
+        <code>ssh-add</code>). terminalox speichert dafür keinen Key.
+      </p>
     {:else if server.hardened}
       <p class="hint warn">
         Dieser Server ist gehärtet — Passwort-Login ist serverseitig deaktiviert.
