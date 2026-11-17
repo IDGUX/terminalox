@@ -10,14 +10,19 @@ use crate::storage::Store;
 fn validate_name(store: &Store, name: &str, except: Option<Uuid>) -> AppResult<String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(AppError::Other("Ordnername darf nicht leer sein".into()));
+        return Err(msg!("folder_name_empty", "Folder name must not be empty").into());
     }
     let taken = store
         .folders
         .iter()
         .any(|f| Some(f.id) != except && f.name.to_lowercase() == name.to_lowercase());
     if taken {
-        return Err(AppError::Other(format!("Ordner „{name}\" existiert bereits")));
+        return Err(msg!(
+            "folder_exists",
+            "Folder \"{name}\" already exists",
+            name = name
+        )
+        .into());
     }
     Ok(name.to_string())
 }
@@ -42,7 +47,11 @@ pub async fn create_folder(name: String, state: State<'_, AppState>) -> AppResul
 }
 
 #[tauri::command]
-pub async fn rename_folder(id: Uuid, name: String, state: State<'_, AppState>) -> AppResult<Folder> {
+pub async fn rename_folder(
+    id: Uuid,
+    name: String,
+    state: State<'_, AppState>,
+) -> AppResult<Folder> {
     let mut store = state.store.write().await;
     let name = validate_name(&store, &name, Some(id))?;
     let folder = store

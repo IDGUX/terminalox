@@ -7,10 +7,12 @@ use russh::keys::ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
+use crate::fsutil;
 use crate::models::KeyInfo;
 
 pub fn ssh_dir() -> AppResult<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Other("home dir not found".into()))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::Other("home directory not found".into()))?;
     let dir = home.join(".ssh");
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -37,19 +39,23 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
-pub fn generate_ed25519(name: &str) -> AppResult<KeyInfo> {
+/// Generates an Ed25519 key in `~/.ssh/terminalox_<name>`. With a passphrase,
+/// the file is encrypted in the standard OpenSSH format.
+pub fn generate_ed25519(name: &str, passphrase: Option<&str>) -> AppResult<KeyInfo> {
     let safe = sanitize(name);
     if safe.is_empty() {
-        return Err(AppError::Other("key name must not be empty".into()));
+        return Err(msg!("key_name_empty", "Key name must not be empty").into());
     }
     let dir = ssh_dir()?;
     let private_path = dir.join(format!("terminalox_{safe}"));
     let public_path = dir.join(format!("terminalox_{safe}.pub"));
-    if private_path.exists() {
-        return Err(AppError::Other(format!(
-            "key file already exists: {}",
-            private_path.display()
-        )));
+    if private_path.exists() || public_path.exists() {
+        return Err(msg!(
+            "key_exists",
+            "Key file already exists: {path}",
+            path = private_path.display()
+        )
+        .into());
     }
 
     let mut rng = UnwrapErr(SysRng);
@@ -58,17 +64,29 @@ pub fn generate_ed25519(name: &str) -> AppResult<KeyInfo> {
     let comment = format!("terminalox:{safe}");
     key.set_comment(comment.as_str());
 
-    let private_pem = key
-        .to_openssh(LineEnding::LF)
-        .map_err(|e| AppError::Other(format!("encode private key: {e}")))?;
     let public_openssh = key
         .public_key()
         .to_openssh()
-        .map_err(|e| AppError::Other(format!("encode public key: {e}")))?;
+        .map_err(|e| AppError::Other(format!("encoding public key: {e}")))?;
     let fingerprint = fingerprint_of(key.public_key());
 
-    write_private(&private_path, private_pem.as_bytes())?;
-    std::fs::write(&public_path, format!("{public_openssh}\n"))?;
+    let passphrase = passphrase.filter(|p| !p.is_empty());
+    let stored = match passphrase {
+        Some(p) => key
+            .encrypt(&mut rng, p)
+            .map_err(|e| AppError::Other(format!("encrypting key: {e}")))?,
+        None => key,
+    };
+    let private_pem = stored
+        .to_openssh(LineEnding::LF)
+        .map_err(|e| AppError::Other(format!("encoding private key: {e}")))?;
+
+    write_key_pair(
+        &private_path,
+        private_pem.as_bytes(),
+        &public_path,
+        &public_openssh,
+    )?;
 
     Ok(KeyInfo {
         id: Uuid::new_v4(),
@@ -80,6 +98,7 @@ pub fn generate_ed25519(name: &str) -> AppResult<KeyInfo> {
         created_at: Utc::now(),
         fingerprint: Some(fingerprint),
         origin_imported: false,
+        encrypted: passphrase.is_some(),
     })
 }
 
@@ -90,32 +109,39 @@ pub fn fingerprint_of(pubkey: &PublicKey) -> String {
 /// Import an existing OpenSSH private key file. Copies it into the terminalox namespace
 /// (`~/.ssh/terminalox_imported_<safe>`) so our delete flow can safely remove it without
 /// touching the user's original file.
+///
+/// Encrypted keys are copied byte for byte (the passphrase is asked on first use);
+/// unencrypted ones are re-serialised to normalise the format.
 pub fn import_from_file(src_private_path: &Path, desired_name: &str) -> AppResult<KeyInfo> {
     let safe = sanitize(desired_name);
     if safe.is_empty() {
-        return Err(AppError::Other("name must not be empty".into()));
+        return Err(msg!("key_name_empty", "Key name must not be empty").into());
     }
     if !src_private_path.exists() {
-        return Err(AppError::Other(format!(
-            "file not found: {}",
-            src_private_path.display()
-        )));
+        return Err(msg!(
+            "file_not_found",
+            "File not found: {path}",
+            path = src_private_path.display()
+        )
+        .into());
     }
 
     let bytes = std::fs::read(src_private_path)?;
-    let content = std::str::from_utf8(&bytes)
-        .map_err(|_| AppError::Other("private key is not UTF-8 OpenSSH format".into()))?;
+    let content = std::str::from_utf8(&bytes).map_err(|_| {
+        msg!(
+            "key_not_openssh",
+            "Private key is not in OpenSSH text format"
+        )
+    })?;
 
     let key = PrivateKey::from_openssh(content).map_err(|e| {
-        AppError::Other(format!(
-            "not a valid OpenSSH private key ({e}). If encrypted, decrypt first with `ssh-keygen -p -N '' -f <file>`."
-        ))
+        msg!(
+            "key_invalid",
+            "Not a valid OpenSSH private key ({detail}). Older PEM keys can be converted with `ssh-keygen -p -f <file>`.",
+            detail = e
+        )
     })?;
-    if key.is_encrypted() {
-        return Err(AppError::Other(
-            "encrypted keys not yet supported; decrypt first with `ssh-keygen -p -N '' -f <file>`".into(),
-        ));
-    }
+    let encrypted = key.is_encrypted();
 
     let algorithm = match key.algorithm() {
         Algorithm::Ed25519 => "ed25519".to_string(),
@@ -127,25 +153,34 @@ pub fn import_from_file(src_private_path: &Path, desired_name: &str) -> AppResul
     let dir = ssh_dir()?;
     let private_path = dir.join(format!("terminalox_imported_{safe}"));
     let public_path = dir.join(format!("terminalox_imported_{safe}.pub"));
-    if private_path.exists() {
-        return Err(AppError::Other(format!(
-            "imported key with this name already exists: {}",
-            private_path.display()
-        )));
+    if private_path.exists() || public_path.exists() {
+        return Err(msg!(
+            "key_exists",
+            "Key file already exists: {path}",
+            path = private_path.display()
+        )
+        .into());
     }
 
-    // Re-serialize to normalize format, then write with correct perms.
-    let private_pem = key
-        .to_openssh(LineEnding::LF)
-        .map_err(|e| AppError::Other(format!("encode private key: {e}")))?;
+    let private_pem = if encrypted {
+        content.to_string()
+    } else {
+        key.to_openssh(LineEnding::LF)
+            .map_err(|e| AppError::Other(format!("encoding private key: {e}")))?
+            .to_string()
+    };
     let public_openssh = key
         .public_key()
         .to_openssh()
-        .map_err(|e| AppError::Other(format!("encode public key: {e}")))?;
+        .map_err(|e| AppError::Other(format!("encoding public key: {e}")))?;
     let fingerprint = fingerprint_of(key.public_key());
 
-    write_private(&private_path, private_pem.as_bytes())?;
-    std::fs::write(&public_path, format!("{public_openssh}\n"))?;
+    write_key_pair(
+        &private_path,
+        private_pem.as_bytes(),
+        &public_path,
+        &public_openssh,
+    )?;
 
     Ok(KeyInfo {
         id: Uuid::new_v4(),
@@ -157,17 +192,23 @@ pub fn import_from_file(src_private_path: &Path, desired_name: &str) -> AppResul
         created_at: Utc::now(),
         fingerprint: Some(fingerprint),
         origin_imported: true,
+        encrypted,
     })
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> AppResult<()> {
-    std::fs::write(path, bytes)?;
-    #[cfg(unix)]
+/// Writes both files with owner-only permissions; never overwrites. If the
+/// public file fails, the private one is removed again.
+fn write_key_pair(
+    private_path: &Path,
+    private_bytes: &[u8],
+    public_path: &Path,
+    public_openssh: &str,
+) -> AppResult<()> {
+    fsutil::write_private_new(private_path, private_bytes)?;
+    if let Err(e) = fsutil::write_private_new(public_path, format!("{public_openssh}\n").as_bytes())
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
+        let _ = std::fs::remove_file(private_path);
+        return Err(e);
     }
     Ok(())
 }

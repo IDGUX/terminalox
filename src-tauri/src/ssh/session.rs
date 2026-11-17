@@ -1,61 +1,49 @@
-use base64::prelude::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use russh::ChannelMsg;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, oneshot};
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
-use crate::error::{AppError, AppResult};
-use crate::models::{AuthMode, KeyInfo, Server};
-use crate::ssh::client;
+use crate::access::Login;
+use crate::error::AppResult;
+use crate::msg::Msg;
 use crate::state::SessionHandle;
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionDataEvent {
-    pub session_id: Uuid,
-    /// Raw PTY bytes, base64-encoded for efficient JSON transport.
-    pub data_b64: String,
-}
+/// Pending keystrokes/pastes per session; `write_session` waits when full.
+const INPUT_QUEUE: usize = 256;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionClosedEvent {
     pub session_id: Uuid,
     pub exit_code: Option<u32>,
-    pub error: Option<String>,
+    pub error: Option<Msg>,
+}
+
+/// Frontend channels: raw PTY bytes (ArrayBuffer on the JS side) and one
+/// closing message.
+pub struct SessionOutput {
+    pub data: Channel<InvokeResponseBody>,
+    pub closed: Channel<SessionClosedEvent>,
 }
 
 pub struct SessionLaunchParams {
-    pub server: Server,
-    pub key: Option<KeyInfo>,
-    pub password: Option<String>,
+    pub login: Login,
     pub cols: u32,
     pub rows: u32,
 }
 
 pub async fn spawn_session(
-    app: AppHandle,
     params: SessionLaunchParams,
-) -> AppResult<(Uuid, SessionHandle)> {
+    output: SessionOutput,
+    sessions: Arc<RwLock<HashMap<Uuid, SessionHandle>>>,
+) -> AppResult<Uuid> {
     let session_id = Uuid::new_v4();
 
-    let mut ssh = client::connect(&params.server.host, params.server.port).await?;
-    match &params.server.auth {
-        AuthMode::Password => {
-            let password = params
-                .password
-                .as_deref()
-                .ok_or_else(|| AppError::Other("password required".into()))?;
-            client::auth_password(&mut ssh, &params.server.user, password).await?;
-        }
-        AuthMode::Key { .. } => {
-            let key = params
-                .key
-                .ok_or_else(|| AppError::Other("key not found for server".into()))?;
-            client::auth_key(&mut ssh, &params.server.user, &key.private_path).await?;
-        }
-    }
+    let ssh = params.login.connect().await?;
 
     let mut channel = ssh.channel_open_session().await?;
     channel
@@ -63,13 +51,23 @@ pub async fn spawn_session(
         .await?;
     channel.request_shell(true).await?;
 
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
     let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
 
-    let app_for_task = app.clone();
+    // Register before the task starts, so a session that ends immediately
+    // still finds (and removes) its own entry.
+    sessions.write().await.insert(
+        session_id,
+        SessionHandle {
+            input_tx,
+            resize_tx,
+            cancel: Some(cancel_tx),
+        },
+    );
+
     tokio::spawn(async move {
-        let mut final_error: Option<String> = None;
+        let mut final_error: Option<Msg> = None;
         let mut exit_code: Option<u32> = None;
 
         loop {
@@ -81,7 +79,7 @@ pub async fn spawn_session(
                 }
                 Some(bytes) = input_rx.recv() => {
                     if let Err(e) = channel.data(bytes.as_slice()).await {
-                        final_error = Some(format!("write: {e}"));
+                        final_error = Some(msg!("send_failed", "Sending failed: {detail}", detail = e));
                         break;
                     }
                 }
@@ -91,25 +89,11 @@ pub async fn spawn_session(
                 msg = channel.wait() => {
                     let Some(msg) = msg else { break; };
                     match msg {
-                        ChannelMsg::Data { ref data } => {
-                            let encoded = BASE64_STANDARD.encode(&data[..]);
-                            let _ = app_for_task.emit(
-                                &event_name(session_id, "data"),
-                                SessionDataEvent {
-                                    session_id,
-                                    data_b64: encoded,
-                                },
-                            );
-                        }
-                        ChannelMsg::ExtendedData { ref data, ext: _ } => {
-                            let encoded = BASE64_STANDARD.encode(&data[..]);
-                            let _ = app_for_task.emit(
-                                &event_name(session_id, "data"),
-                                SessionDataEvent {
-                                    session_id,
-                                    data_b64: encoded,
-                                },
-                            );
+                        ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
+                            if output.data.send(InvokeResponseBody::Raw(data.to_vec())).is_err() {
+                                // Frontend is gone (window closed / reloaded).
+                                break;
+                            }
                         }
                         ChannelMsg::ExitStatus { exit_status } => {
                             exit_code = Some(exit_status);
@@ -123,29 +107,16 @@ pub async fn spawn_session(
             }
         }
 
+        sessions.write().await.remove(&session_id);
         let _ = ssh
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await;
-        let _ = app_for_task.emit(
-            &event_name(session_id, "closed"),
-            SessionClosedEvent {
-                session_id,
-                exit_code,
-                error: final_error,
-            },
-        );
+        let _ = output.closed.send(SessionClosedEvent {
+            session_id,
+            exit_code,
+            error: final_error,
+        });
     });
 
-    Ok((
-        session_id,
-        SessionHandle {
-            input_tx,
-            resize_tx,
-            cancel: Some(cancel_tx),
-        },
-    ))
-}
-
-pub fn event_name(session_id: Uuid, suffix: &str) -> String {
-    format!("session:{session_id}:{suffix}")
+    Ok(session_id)
 }

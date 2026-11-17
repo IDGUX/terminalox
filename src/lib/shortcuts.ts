@@ -1,3 +1,6 @@
+import { t } from "./i18n/index.svelte";
+
+
 export const isMac =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.userAgent);
 
@@ -10,5 +13,5 @@ export function isAppShortcut(e: KeyboardEvent, key: string): boolean {
 }
 
 export function shortcutLabel(key: string): string {
-  return isMac ? `⌘${key.toUpperCase()}` : `Strg+Shift+${key.toUpperCase()}`;
+  return isMac ? `⌘${key.toUpperCase()}` : `${t("shortcut.ctrl")}+Shift+${key.toUpperCase()}`;
 }

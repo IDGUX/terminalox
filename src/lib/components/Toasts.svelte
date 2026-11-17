@@ -1,15 +1,16 @@
 <script lang="ts">
   import { toast } from "$lib/stores/toast.svelte";
+  import { t } from "$lib/i18n/index.svelte";
 </script>
 
 <div class="toast-stack" aria-live="polite">
-  {#each toast.items as t (t.id)}
-    <div class="toast {t.kind}">
+  {#each toast.items as item (item.id)}
+    <div class="toast {item.kind}">
       <span class="icon">
-        {#if t.kind === "success"}✓{:else if t.kind === "error"}✕{:else}ⓘ{/if}
+        {#if item.kind === "success"}✓{:else if item.kind === "error"}✕{:else}ⓘ{/if}
       </span>
-      <span class="msg">{t.message}</span>
-      <button class="close" onclick={() => toast.dismiss(t.id)} aria-label="Schließen">×</button>
+      <span class="msg">{item.message}</span>
+      <button class="close" onclick={() => toast.dismiss(item.id)} aria-label={t("common.close")}>×</button>
     </div>
   {/each}
 </div>

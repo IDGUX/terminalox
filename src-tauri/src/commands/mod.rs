@@ -5,5 +5,7 @@ pub mod folders;
 pub mod harden;
 pub mod hostkeys;
 pub mod keys;
+pub mod rotate;
+pub mod secrets;
 pub mod servers;
 pub mod session;

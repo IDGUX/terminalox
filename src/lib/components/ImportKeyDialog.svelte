@@ -2,6 +2,7 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
+  import { errorText, t } from "$lib/i18n/index.svelte";
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -23,7 +24,7 @@
       multiple: false,
       directory: false,
       defaultPath: home ? `${home}/.ssh` : undefined,
-      title: "Private Key wählen",
+      title: t("importKey.pickTitle"),
     });
     if (typeof selected === "string") {
       sourcePath = selected;
@@ -40,10 +41,10 @@
     submitting = true;
     try {
       const key = await app.importKey(sourcePath, name.trim());
-      toast.success(`Key „${key.name}" importiert (${key.algorithm})`);
+      toast.success(t("importKey.toast", { name: key.name, algorithm: key.algorithm }));
       onClose();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       submitting = false;
     }
@@ -57,33 +58,31 @@
 <!-- Kein Schließen per Klick daneben: ein verirrter Klick würde alle Eingaben verwerfen. -->
 <div class="overlay">
   <form class="dialog" onsubmit={submit}>
-    <h3>SSH-Key importieren</h3>
+    <h3>{t("importKey.title")}</h3>
     <p class="hint">
-      Wähle einen bestehenden Private Key (z.B. <code>~/.ssh/id_ed25519</code>). Die Datei
-      wird nach <code>~/.ssh/terminalox_imported_&lt;name&gt;</code> kopiert und im Store
-      registriert. <strong>Das Original bleibt unangetastet.</strong> Verschlüsselte Keys
-      (mit Passphrase) werden noch nicht unterstützt.
+      {t("importKey.intro")} <strong>{t("importKey.original")}</strong>
+      {t("importKey.encrypted")}
     </p>
 
     <label>
-      Pfad zum Private Key
+      {t("importKey.path")}
       <div class="row">
         <input bind:value={sourcePath} placeholder="/Users/you/.ssh/id_ed25519" required />
-        <button type="button" onclick={pickFile}>Durchsuchen…</button>
+        <button type="button" onclick={pickFile}>{t("common.browse")}</button>
       </div>
     </label>
 
     <label>
-      Name in terminalox
-      <input bind:value={name} placeholder="z.B. personal_laptop" required />
+      {t("importKey.name")}
+      <input bind:value={name} placeholder={t("importKey.namePlaceholder")} required />
     </label>
 
     {#if error}<p class="error">{error}</p>{/if}
 
     <div class="buttons">
-      <button type="button" onclick={onClose}>Abbrechen</button>
+      <button type="button" onclick={onClose}>{t("common.cancel")}</button>
       <button type="submit" class="primary" disabled={submitting}>
-        {submitting ? "…" : "Importieren"}
+        {submitting ? "…" : t("backup.import")}
       </button>
     </div>
   </form>

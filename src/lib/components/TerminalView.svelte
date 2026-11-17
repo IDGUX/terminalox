@@ -3,12 +3,14 @@
   import { Terminal, type IDisposable } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { WebLinksAddon } from "@xterm/addon-web-links";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import "@xterm/xterm/css/xterm.css";
   import { api } from "$lib/api";
   import { isAppShortcut } from "$lib/shortcuts";
   import { app } from "$lib/stores/app.svelte";
-  import type { Server, SessionClosedEvent, SessionDataEvent } from "$lib/types";
+  import { toast } from "$lib/stores/toast.svelte";
+  import { t, tm, type MessageKey } from "$lib/i18n/index.svelte";
+  import type { Server, SessionClosedEvent } from "$lib/types";
 
   let {
     server,
@@ -29,21 +31,14 @@
   let fit: FitAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let sessionId: string | null = null;
-  let unlistenData: UnlistenFn | null = null;
-  let unlistenClosed: UnlistenFn | null = null;
+  /** Bumped per connection attempt; late output of an old session is dropped. */
+  let generation = 0;
   let onDataDisposable: IDisposable | null = null;
   let onResizeDisposable: IDisposable | null = null;
   let status = $state<"connecting" | "connected" | "closed" | "error">("connecting");
   let statusDetail = $state<string>("");
-  let passwordPrompt = $state<string | null>(null);
-  let passwordInput = $state("");
 
-  function decode(b64: string): Uint8Array {
-    const bin = atob(b64);
-    const arr = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    return arr;
-  }
+  const encoder = new TextEncoder();
 
   function encode(bytes: Uint8Array): string {
     let bin = "";
@@ -52,10 +47,7 @@
   }
 
   async function teardownSession() {
-    unlistenData?.();
-    unlistenData = null;
-    unlistenClosed?.();
-    unlistenClosed = null;
+    generation++;
     onDataDisposable?.dispose();
     onDataDisposable = null;
     onResizeDisposable?.dispose();
@@ -69,52 +61,53 @@
     }
   }
 
-  async function start(password: string | null) {
+  function onClosed(ev: SessionClosedEvent) {
+    status = "closed";
+    statusDetail = ev.error
+      ? t("term.error", { detail: tm(ev.error) })
+      : ev.exitCode !== null && ev.exitCode !== undefined
+        ? t("term.exit", { code: ev.exitCode })
+        : t("term.ended");
+  }
+
+  async function start() {
     status = "connecting";
     statusDetail = "";
 
     if (!term) return;
     term.clear();
-    const cols = term.cols;
-    const rows = term.rows;
+    const gen = ++generation;
 
+    let sid: string;
     try {
-      sessionId = await api.openSession(server.id, password, cols, rows);
+      // Passwörter/Passphrasen fragt der globale Dialog ab (siehe api.invoke).
+      sid = await api.openSession(
+        server.id,
+        term.cols,
+        term.rows,
+        (bytes) => gen === generation && term?.write(bytes),
+        (ev) => gen === generation && onClosed(ev),
+      );
     } catch (e) {
-      const msg = String(e);
-      if (server.auth.mode === "password" && !password) {
-        passwordPrompt = "Passwort erforderlich";
-        status = "error";
-        statusDetail = "";
-        return;
-      }
+      if (gen !== generation) return;
       status = "error";
-      statusDetail = msg;
+      statusDetail = String(e);
       return;
     }
+    if (gen !== generation) {
+      // Torn down while connecting.
+      api.closeSession(sid).catch(() => {});
+      return;
+    }
+    sessionId = sid;
 
     app.activeSessionId = sessionId;
     app.markUsed(server.id);
     status = "connected";
-    passwordPrompt = null;
-
-    const sid = sessionId;
-    unlistenData = await listen<SessionDataEvent>(`session:${sid}:data`, (ev) => {
-      term?.write(decode(ev.payload.dataB64));
-    });
-    unlistenClosed = await listen<SessionClosedEvent>(`session:${sid}:closed`, (ev) => {
-      status = "closed";
-      statusDetail = ev.payload.error
-        ? `Fehler: ${ev.payload.error}`
-        : ev.payload.exitCode !== null && ev.payload.exitCode !== undefined
-          ? `Exit ${ev.payload.exitCode}`
-          : "Verbindung beendet";
-    });
 
     onDataDisposable = term.onData((str) => {
       if (!sessionId) return;
-      const bytes = new TextEncoder().encode(str);
-      api.writeSession(sessionId, encode(bytes)).catch(() => {});
+      api.writeSession(sessionId, encode(encoder.encode(str))).catch(() => {});
     });
 
     onResizeDisposable = term.onResize(({ cols, rows }) => {
@@ -125,30 +118,23 @@
 
   async function reconnect() {
     await teardownSession();
-    if (server.auth.mode === "password") {
-      passwordPrompt = "Passwort erforderlich";
-      status = "connecting";
-      statusDetail = "";
-    } else {
-      await start(null);
-    }
+    await start();
   }
 
   async function disconnect() {
     await teardownSession();
     status = "closed";
-    statusDetail = "Manuell getrennt";
-  }
-
-  async function submitPassword(e: Event) {
-    e.preventDefault();
-    const p = passwordInput;
-    passwordInput = "";
-    await start(p);
+    statusDetail = t("term.manual");
   }
 
   function resize() {
     fit?.fit();
+  }
+
+  /** Links öffnen im System-Browser, nie im App-Fenster. */
+  function openLink(_ev: MouseEvent, uri: string) {
+    if (!/^https?:\/\//i.test(uri)) return;
+    openUrl(uri).catch((e) => toast.error(t("term.linkFailed", { detail: String(e) })));
   }
 
   onMount(async () => {
@@ -165,7 +151,7 @@
     });
     fit = new FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon());
+    term.loadAddon(new WebLinksAddon(openLink));
     // ⌘K (Strg+Shift+K) leert Bildschirm + Scrollback wie in Terminal.app/iTerm;
     // die aktuelle Prompt-Zeile bleibt stehen.
     term.attachCustomKeyEventHandler((e) => {
@@ -179,11 +165,7 @@
     resizeObserver = new ResizeObserver(() => fit?.fit());
     resizeObserver.observe(host);
 
-    if (server.auth.mode === "password") {
-      passwordPrompt = "Passwort erforderlich";
-    } else {
-      await start(null);
-    }
+    await start();
   });
 
   onDestroy(() => {
@@ -206,24 +188,24 @@
         type="button"
         class="hbtn"
         onclick={reconnect}
-        title="Erneut verbinden"
-        aria-label="Erneut verbinden"
+        title={t("term.reconnect")}
+        aria-label={t("term.reconnect")}
       >↻</button>
       <button
         type="button"
         class="hbtn"
         onclick={disconnect}
         disabled={status !== "connected" && status !== "connecting"}
-        title="Verbindung beenden"
-        aria-label="Verbindung beenden"
+        title={t("term.disconnect")}
+        aria-label={t("term.disconnect")}
       >⏻</button>
       {#if canSplit && onSplit}
         <button
           type="button"
           class="hbtn"
           onclick={onSplit}
-          title="Neues Terminal (Split)"
-          aria-label="Neues Terminal"
+          title={t("term.split")}
+          aria-label={t("term.newTerminal")}
         >＋</button>
       {/if}
       {#if canClose && onClose}
@@ -231,8 +213,8 @@
           type="button"
           class="hbtn close"
           onclick={onClose}
-          title="Diesen Bereich schließen"
-          aria-label="Bereich schließen"
+          title={t("term.closePane")}
+          aria-label={t("term.closePaneAria")}
         >✕</button>
       {/if}
       <div
@@ -240,35 +222,13 @@
         class:ok={status === "connected"}
         class:bad={status === "error" || status === "closed"}
       >
-        {status}{statusDetail ? ` — ${statusDetail}` : ""}
+        {t(`term.status.${status}` as MessageKey)}{statusDetail ? ` — ${statusDetail}` : ""}
       </div>
     </div>
   </div>
 
   <div class="term" bind:this={host}></div>
 
-  {#if passwordPrompt}
-    <div class="pw-overlay">
-      <form class="pw" onsubmit={submitPassword}>
-        <label>
-          {passwordPrompt}
-          <input
-            type="password"
-            bind:value={passwordInput}
-            autofocus
-            placeholder="SSH-Passwort"
-          />
-        </label>
-        <div class="pw-buttons">
-          <button type="submit" class="primary">Verbinden</button>
-        </div>
-        <p class="hint">
-          Tipp: Nach der Verbindung kannst du links „SSH-Key deployen" klicken —
-          danach brauchst du kein Passwort mehr.
-        </p>
-      </form>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -354,43 +314,4 @@
     min-height: 0;
   }
 
-  .pw-overlay {
-    position: absolute;
-    inset: 0;
-    background: rgba(0,0,0,0.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .pw {
-    background: #1f232b;
-    padding: 18px;
-    border-radius: 10px;
-    border: 1px solid #2a2e37;
-    width: 360px;
-    color: #e5e7eb;
-  }
-  .pw label { font-size: 12px; color: #9ca3af; display: block; }
-  .pw input {
-    width: 100%;
-    padding: 8px 10px;
-    background: #11141a;
-    border: 1px solid #2a2e37;
-    color: #e5e7eb;
-    border-radius: 6px;
-    margin-top: 6px;
-    box-sizing: border-box;
-    font-size: 14px;
-  }
-  .pw-buttons { margin-top: 12px; display: flex; justify-content: flex-end; }
-  .primary {
-    padding: 8px 14px;
-    border-radius: 6px;
-    border: 1px solid #2563eb;
-    background: #2563eb;
-    color: white;
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .hint { font-size: 11px; color: #6b7280; margin-top: 10px; line-height: 1.4; }
 </style>

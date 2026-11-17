@@ -2,19 +2,20 @@
   import { invoke } from "$lib/api";
   import { app } from "$lib/stores/app.svelte";
   import { toast } from "$lib/stores/toast.svelte";
-  import type { Server } from "$lib/types";
+  import { errorText, t, tm } from "$lib/i18n/index.svelte";
+  import type { Msg, Server } from "$lib/types";
 
   let { server, onClose }: { server: Server; onClose: () => void } = $props();
 
   interface DeleteReport {
     serverRemoved: boolean;
-    remoteUnhardenError: string | null;
-    remoteCleanupError: string | null;
-    localKeyError: string | null;
+    remoteUnhardenError: Msg | null;
+    remoteCleanupError: Msg | null;
+    localKeyError: Msg | null;
     keyStillReferenced: boolean;
     hardeningKept: boolean;
     hardeningRestored: boolean;
-    hardeningRestoreError: string | null;
+    hardeningRestoreError: Msg | null;
   }
 
   let cleanupRemote = $state(true);
@@ -51,12 +52,13 @@
         },
       });
       if (!report.serverRemoved) {
-        let message =
-          report.remoteUnhardenError ?? report.remoteCleanupError ?? "Löschen fehlgeschlagen.";
+        const cause = report.remoteUnhardenError ?? report.remoteCleanupError;
+        let message = cause ? tm(cause) : t("delete.failed");
         if (report.hardeningRestored) {
-          message += " Das SSH-Hardening wurde wiederhergestellt.";
+          message += " " + t("delete.hardeningRestored");
         } else if (report.hardeningRestoreError) {
-          message += ` Das SSH-Hardening konnte nicht wiederhergestellt werden (${report.hardeningRestoreError}); Passwort-Login ist auf dem Server wieder aktiv.`;
+          message +=
+            " " + t("delete.hardeningRestoreFailed", { detail: tm(report.hardeningRestoreError) });
         }
         remoteError = message;
         return;
@@ -65,16 +67,16 @@
       if (app.selectedServerId === server.id) app.selectedServerId = null;
       await app.refresh();
       if (report.hardeningKept) {
-        toast.info("Das SSH-Hardening bleibt auf dem Server aktiv.");
+        toast.info(t("delete.toastHardeningKept"));
       }
       if (report.localKeyError) {
-        toast.error(`SSH-Key konnte nicht vollständig gelöscht werden: ${report.localKeyError}`);
+        toast.error(t("delete.toastKeyError", { detail: tm(report.localKeyError) }));
       } else if (removeUnusedKey && report.keyStillReferenced) {
-        toast.info("Der SSH-Key bleibt erhalten, da ihn ein anderer Servereintrag verwendet.");
+        toast.info(t("delete.toastKeyKept"));
       }
       onClose();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       submitting = false;
     }
@@ -90,48 +92,45 @@
 
 <div class="overlay">
   <form class="dialog" onsubmit={submit}>
-    <h3>Server „{server.name}“ löschen?</h3>
+    <h3>{t("delete.title", { name: server.name })}</h3>
     <p class="meta">{server.user}@{server.host}{server.port !== 22 ? `:${server.port}` : ""}</p>
 
     {#if hasKeyAuth}
       <label class="checkbox">
         <input type="checkbox" bind:checked={cleanupRemote} disabled={submitting} />
-        SSH-Key auch vom Server entfernen
+        {t("delete.cleanupRemote")}
       </label>
 
       {#if cleanupRemote}
         <label>
-          SSH-Login-Passwort für {server.user}@{server.host}
+          {t("delete.loginPassword", { target: `${server.user}@${server.host}` })}
           <input type="password" bind:value={password} autocomplete="current-password" disabled={submitting} />
-          <span class="hint">terminalox prüft den Passwort-Login, bevor es den SSH-Key entfernt.</span>
+          <span class="hint">{t("delete.passwordHint")}</span>
         </label>
         {#if usePassword}
           {#if server.hardened}
-            <p class="body revert">
-              terminalox macht zuerst das SSH-Hardening rückgängig. Schlägt der Passwort-Login danach fehl,
-              wird das Hardening wiederhergestellt.
-            </p>
+            <p class="body revert">{t("delete.unhardenFirst")}</p>
           {/if}
         {:else}
           <label class="checkbox">
             <input type="checkbox" bind:checked={otherKeyConfirmed} disabled={submitting} />
-            Kein Passwort – ich habe einen anderen SSH-Key für diesen Account
+            {t("delete.otherKey")}
           </label>
           <span class="hint">
-            Der Key wird nur entfernt, wenn danach noch ein anderer Key in authorized_keys steht.
-            {#if server.hardened}Das SSH-Hardening bleibt aktiv.{/if}
+            {t("delete.otherKeyHint")}
+            {#if server.hardened}{t("delete.hardeningStays")}{/if}
           </span>
         {/if}
         {#if showSudo}
           <label>
-            sudo-Passwort (falls erforderlich)
+            {t("delete.sudoPassword")}
             <input type="password" bind:value={sudoPassword} autocomplete="current-password" disabled={submitting} />
           </label>
         {/if}
       {:else}
         <label class="checkbox">
           <input type="checkbox" bind:checked={deleteUnusedLocalKey} disabled={submitting} />
-          Zugehörigen privaten SSH-Key lokal löschen, falls ihn kein anderer Servereintrag verwendet
+          {t("delete.deleteLocalKey")}
         </label>
       {/if}
     {/if}
@@ -140,16 +139,16 @@
     {#if error}<p class="error">{error}</p>{/if}
 
     <div class="buttons">
-      <button type="button" onclick={onClose} disabled={submitting}>Abbrechen</button>
+      <button type="button" onclick={onClose} disabled={submitting}>{t("common.cancel")}</button>
       {#if remoteError && cleanupRemote}
-        <button type="button" onclick={() => remove(true)} disabled={submitting}>Nur lokal löschen</button>
+        <button type="button" onclick={() => remove(true)} disabled={submitting}>{t("delete.localOnly")}</button>
       {/if}
       <button
         type="submit"
         class="danger"
         disabled={submitting || (hasKeyAuth && cleanupRemote && !usePassword && !otherKeyConfirmed)}
       >
-        {submitting ? "…" : remoteError && cleanupRemote ? "Erneut versuchen" : "Löschen"}
+        {submitting ? "…" : remoteError && cleanupRemote ? t("delete.retry") : t("delete.submit")}
       </button>
     </div>
   </form>

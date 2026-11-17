@@ -1,24 +1,25 @@
 <script lang="ts">
+  import { t } from "$lib/i18n/index.svelte";
   let { value = $bindable() }: { value: string | null } = $props();
 
-  const COLORS: { hex: string; label: string }[] = [
-    { hex: "#ef4444", label: "Rot" },
-    { hex: "#f97316", label: "Orange" },
-    { hex: "#eab308", label: "Gelb" },
-    { hex: "#22c55e", label: "Grün" },
-    { hex: "#3b82f6", label: "Blau" },
-    { hex: "#a855f7", label: "Lila" },
-  ];
+  const COLORS = $derived<{ hex: string; label: string }[]>([
+    { hex: "#ef4444", label: t("color.red") },
+    { hex: "#f97316", label: t("color.orange") },
+    { hex: "#eab308", label: t("color.yellow") },
+    { hex: "#22c55e", label: t("color.green") },
+    { hex: "#3b82f6", label: t("color.blue") },
+    { hex: "#a855f7", label: t("color.purple") },
+  ]);
 </script>
 
-<div class="picker" role="radiogroup" aria-label="Farbe">
+<div class="picker" role="radiogroup" aria-label={t("color.label")}>
   <button
     type="button"
     class="swatch none"
     class:sel={!value}
     role="radio"
     aria-checked={!value}
-    title="Keine Farbe"
+    title={t("color.none")}
     onclick={() => (value = null)}>∅</button>
   {#each COLORS as c (c.hex)}
     <button
