@@ -1,5 +1,7 @@
 # terminalox
 
+[![CI](https://github.com/IDGUX/terminalox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/IDGUX/terminalox/actions/workflows/ci.yml)
+
 > **Disclaimer.** terminalox is an experimental open-source side project provided
 > **AS-IS** and is **not developed in the course of a commercial activity**. It is
 > **not intended for production use**. Installers published under Releases are
@@ -105,11 +107,16 @@ src-tauri/
   tauri.conf.json       App metadata
 ```
 
+## Development checks
+
+Run `pnpm check` for frontend diagnostics, `pnpm build` for the static frontend build, and `cargo check --locked --all-targets` from `src-tauri/` to check the Rust targets. GitHub Actions also tests key revocation and timed rollback against OpenSSH on Linux.
+
 ## Security notes
 
 - Passwords are **never persisted**. terminalox uses them for SSH login during deployment and cleanup, or for `sudo` when changing the server configuration.
 - Managed private keys are unencrypted files under `~/.ssh/terminalox_*`. On Unix, terminalox applies `0600` after writing the file. On Windows, the files inherit filesystem permissions. Passphrase-protected private-key import is currently unsupported.
 - terminalox checks `~/.ssh/known_hosts` before sending credentials. For a new key, compare the displayed SHA-256 fingerprint with a fingerprint obtained through a trusted channel before accepting it. A changed key of the same algorithm triggers a warning. Approving a replacement appends it to `known_hosts`; retire the old key separately once you have verified the rotation. An unreadable trust store can be treated as empty, and the parser does not honor OpenSSH `@revoked` markers.
+- Host verification uses public host keys. OpenSSH host certificates and certificate authority entries are currently unsupported.
 - SSH hardening installs `/etc/ssh/sshd_config.d/00-terminalox.conf` and may add a managed `Include` block to `/etc/ssh/sshd_config`. Uninstalling terminalox leaves the remote configuration in place.
 - Hardening changes a daemon-wide SSH configuration. Verification evaluates `Match` rules for the tested SSH user and connection. Other users or source addresses can have different settings. Keep a separate recovery channel available. The transient systemd timer survives an SSH disconnect; a server reboot or a failed service reload may require manual recovery. Pending rollback files are stored in `/etc/ssh/.terminalox-pending`.
 - Backups protected by a passphrase use AES-256-GCM with Argon2id (64 MiB, 3 iterations, 4 lanes). Plain JSON backups contain private keys in base64. Set a passphrase to protect exported keys.

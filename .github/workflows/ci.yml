@@ -44,7 +44,7 @@ jobs:
 
       - name: cargo check
         working-directory: src-tauri
-        run: cargo check --all-targets
+        run: cargo check --locked --all-targets
 
       - name: Test key revocation and timed hardening rollback against OpenSSH
         working-directory: src-tauri
@@ -74,7 +74,7 @@ jobs:
           sudo /usr/sbin/sshd -f "$fixture/sshd_config" -E "$fixture/sshd.log"
           mkdir -p "$HOME/.ssh"
           printf '[127.0.0.1]:22222 %s\n' "$(cat "$fixture/host.pub")" >> "$HOME/.ssh/known_hosts"
-          cargo test --lib revocation_requires_a_working_password_login -- --ignored
+          cargo test --locked --lib revocation_requires_a_working_password_login -- --ignored
 
           sudo kill "$(sudo cat "$fixture/sshd.pid")"
           sudo install -m 600 -o terminalox-test "$TERMINALOX_TEST_KEY.pub" /home/terminalox-test/.ssh/authorized_keys
@@ -87,12 +87,12 @@ jobs:
             sudo tee /etc/ssh/sshd_config.d/00-terminalox.conf >/dev/null
           if systemctl is-active --quiet ssh.socket; then sudo systemctl stop ssh.socket; fi
           sudo systemctl restart ssh.service
-          if ! cargo test --lib hardening_restores_config_without_confirmation_and_commits_after_reconnect -- --ignored; then
+          if ! cargo test --locked --lib hardening_restores_config_without_confirmation_and_commits_after_reconnect -- --ignored; then
             sudo journalctl -u ssh.service -u 'terminalox-rollback-*.service' --no-pager -n 100
             exit 1
           fi
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
         continue-on-error: true
