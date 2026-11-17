@@ -11,7 +11,7 @@
     remoteCleanupError: string | null;
   }
 
-  let cleanupRemote = $state(server.auth.mode === "key");
+  let cleanupRemote = $state(true);
   let password = $state("");
   let sudoPassword = $state("");
   let submitting = $state(false);
@@ -19,18 +19,19 @@
   let remoteError = $state<string | null>(null);
 
   const hasKeyAuth = $derived(server.auth.mode === "key");
-  const showSudo = $derived(cleanupRemote && server.hardened && server.user !== "root");
+  const showSudo = $derived(hasKeyAuth && cleanupRemote && server.hardened && server.user !== "root");
 
   async function remove(localOnly: boolean) {
     error = null;
     submitting = true;
     try {
+      const cleanUpOnServer = !localOnly && hasKeyAuth && cleanupRemote;
       const report = await invoke<DeleteReport>("delete_server_full", {
         opts: {
           id: server.id,
-          cleanupRemote: !localOnly && cleanupRemote,
-          password: !localOnly && cleanupRemote ? password : null,
-          sudoPassword: !localOnly && showSudo && sudoPassword ? sudoPassword : null,
+          cleanupRemote: cleanUpOnServer,
+          password: cleanUpOnServer ? password : null,
+          sudoPassword: cleanUpOnServer && showSudo && sudoPassword ? sudoPassword : null,
           force: localOnly,
         },
       });
@@ -124,7 +125,6 @@
   .meta { color: #9ca3af; margin: 0 0 14px; font-size: 12px; }
   .body { font-size: 13px; color: #d1d5db; line-height: 1.5; margin: 0 0 14px; }
   .body.revert { background: #0f2537; padding: 10px; border-radius: 6px; color: #93c5fd; font-size: 12px; }
-  .muted { color: #6b7280; }
   .hint { font-size: 11px; color: #9ca3af; display: block; margin-top: 4px; }
   label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 10px; }
   label.checkbox { display: flex; align-items: center; gap: 8px; color: #e5e7eb; font-size: 13px; }
