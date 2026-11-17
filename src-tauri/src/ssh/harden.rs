@@ -61,9 +61,18 @@ pub async fn probe_readiness(
 ) -> AppResult<HardenReadiness> {
     // Emit structured lines; capture sudo -n's stderr into a base64-encoded line
     // so we can inspect it without worrying about newlines / escaping.
-    let script = r#"if command -v systemd-run >/dev/null && command -v flock >/dev/null &&
-    (systemctl is-active --quiet ssh.service || systemctl is-active --quiet sshd.service); then
+    // The transaction needs bash, flock and a timer (systemd-run or setsid).
+    // BusyBox provides flock and setsid, so Alpine only lacks bash by default.
+    let script = r#"missing=
+command -v bash >/dev/null 2>&1 || missing="$missing bash"
+command -v flock >/dev/null 2>&1 || missing="$missing flock"
+if ! command -v systemd-run >/dev/null 2>&1 && ! command -v setsid >/dev/null 2>&1; then
+    missing="$missing setsid"
+fi
+if [ -z "$missing" ]; then
     echo "ROLLBACK:available"
+else
+    echo "MISSING:$missing"
 fi
 echo "UID:$(id -u)"
 if ! command -v sudo >/dev/null 2>&1; then
@@ -81,8 +90,17 @@ fi
 "#;
     let (_exit, stdout, _stderr) = exec_collect(session, script, "").await?;
     if !stdout.lines().any(|line| line == "ROLLBACK:available") {
+        let missing = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("MISSING:"))
+            .map(str::trim)
+            .unwrap_or("bash, flock, setsid");
         return Ok(HardenReadiness::Unavailable {
-            reason: "Die Härtung benötigt einen laufenden systemd-SSH-Dienst und einen serverseitigen Rollback-Timer.".into(),
+            reason: format!(
+                "Für den automatischen Rollback fehlen auf dem Server: {missing}. \
+                 Bitte nachinstallieren (z. B. Alpine: `apk add bash util-linux`, \
+                 Debian/Ubuntu: `apt install bash util-linux`) und erneut versuchen."
+            ),
         });
     }
 
@@ -181,9 +199,15 @@ pub async fn harden(
                 });
             }
         };
+    let rolled_back = stdout.lines().any(|line| line.trim() == "STEP:rolled_back");
     let mut outcome = parse_harden_stdout(&stdout, stderr);
     if exit != 0 || !outcome.dropin_installed || !outcome.sshd_validated || !outcome.sshd_reloaded {
-        outcome.stderr = format!("exit {exit}: {}. {rollback_notice}", outcome.stderr.trim());
+        let notice = if rolled_back {
+            "Die vorherige SSH-Konfiguration wurde sofort wiederhergestellt."
+        } else {
+            rollback_notice
+        };
+        outcome.stderr = format!("exit {exit}: {}. {notice}", outcome.stderr.trim());
         return Ok(outcome);
     }
 
@@ -314,10 +338,21 @@ pub async fn unharden(
 }
 
 fn build_transaction_command(action: &str, token: uuid::Uuid, delay: u64) -> String {
+    build_transaction_command_with_timer(action, token, delay, "auto")
+}
+
+/// `timer_mode` is `auto` (systemd timer when available, else setsid) or
+/// `detached` (always setsid; lets CI cover hosts without systemd).
+fn build_transaction_command_with_timer(
+    action: &str,
+    token: uuid::Uuid,
+    delay: u64,
+    timer_mode: &str,
+) -> String {
     let script = TRANSACTION.replace('\'', "'\\''");
     format!(
         r#"program='{script}'
-set -- -c "$program" terminalox '{action}' '{token}' "${{SSH_CONNECTION:-}}" "$(id -un)" '{delay}'
+set -- -c "$program" terminalox '{action}' '{token}' "${{SSH_CONNECTION:-}}" "$(id -un)" '{delay}' '{timer_mode}'
 if [ "$(id -u)" -eq 0 ]; then
     exec /bin/bash "$@"
 elif ! command -v sudo >/dev/null; then
@@ -436,23 +471,24 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
-    #[ignore = "requires the disposable systemd OpenSSH server configured by CI"]
-    async fn hardening_restores_config_without_confirmation_and_commits_after_reconnect() {
-        let host = "127.0.0.1";
-        let port = 22222;
-        let user = "terminalox-test";
-        let key = std::env::var("TERMINALOX_TEST_KEY").unwrap();
-        let password = std::env::var("TERMINALOX_TEST_PASSWORD").unwrap();
+    const HOST: &str = "127.0.0.1";
+    const PORT: u16 = 22222;
+    const USER: &str = "terminalox-test";
+    const PENDING: &str = "/etc/ssh/.terminalox-pending";
+
+    /// Apply without confirming, drop the transport and wait for the timer to
+    /// restore the previous configuration byte for byte.
+    async fn assert_timer_rolls_back(key: &str, password: &str, timer_mode: &str) {
         let ssh_config = "/etc/ssh/sshd_config";
         let original_config = std::fs::read(ssh_config).unwrap();
         let original_dropin = std::fs::read(DROPIN_PATH).unwrap();
 
-        let session = open_key_session(host, port, user, &key).await.unwrap();
+        let session = open_key_session(HOST, PORT, USER, key).await.unwrap();
         let mut channel = session.channel_open_session().await.unwrap();
-        let apply = build_transaction_command("apply", uuid::Uuid::new_v4(), 10);
+        let apply =
+            build_transaction_command_with_timer("apply", uuid::Uuid::new_v4(), 10, timer_mode);
         channel.exec(true, apply.as_bytes()).await.unwrap();
-        let input = BASE64_STANDARD.encode(&password);
+        let input = BASE64_STANDARD.encode(password);
         channel.data(input.as_bytes()).await.unwrap();
         channel.eof().await.unwrap();
         let mut output = Vec::new();
@@ -473,16 +509,16 @@ mod tests {
         drop(channel);
         drop(session);
 
-        let hardened_session = connect_after_reload(host, port, user, &key).await.unwrap();
+        let hardened_session = connect_after_reload(HOST, PORT, USER, key).await.unwrap();
         drop(hardened_session);
 
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let password_works = match client::connect(host, port).await {
-                    Ok(mut fresh) => client::auth_password(&mut fresh, user, &password).await.is_ok(),
+                let password_works = match client::connect(HOST, PORT).await {
+                    Ok(mut fresh) => client::auth_password(&mut fresh, USER, password).await.is_ok(),
                     Err(_) => false,
                 };
-                if password_works && !std::fs::exists("/etc/ssh/.terminalox-pending").unwrap() {
+                if password_works && !std::fs::exists(PENDING).unwrap() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -492,12 +528,28 @@ mod tests {
         .expect("the timer should restore password login after losing the transport");
         assert_eq!(std::fs::read(ssh_config).unwrap(), original_config);
         assert_eq!(std::fs::read(DROPIN_PATH).unwrap(), original_dropin);
+    }
 
-        let session = open_key_session(host, port, user, &key).await.unwrap();
-        let outcome = harden(session, (host, port, user, &key), Some(&password))
+    #[tokio::test]
+    #[ignore = "requires the disposable OpenSSH server configured by CI"]
+    async fn detached_timer_rolls_back_without_systemd_run() {
+        let key = std::env::var("TERMINALOX_TEST_KEY").unwrap();
+        let password = std::env::var("TERMINALOX_TEST_PASSWORD").unwrap();
+        assert_timer_rolls_back(&key, &password, "detached").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the disposable systemd OpenSSH server configured by CI"]
+    async fn hardening_restores_config_without_confirmation_and_commits_after_reconnect() {
+        let key = std::env::var("TERMINALOX_TEST_KEY").unwrap();
+        let password = std::env::var("TERMINALOX_TEST_PASSWORD").unwrap();
+        assert_timer_rolls_back(&key, &password, "auto").await;
+
+        let session = open_key_session(HOST, PORT, USER, &key).await.unwrap();
+        let outcome = harden(session, (HOST, PORT, USER, &key), Some(&password))
             .await
             .unwrap();
         assert!(outcome.all_ok(), "{outcome:?}");
-        assert!(!std::fs::exists("/etc/ssh/.terminalox-pending").unwrap());
+        assert!(!std::fs::exists(PENDING).unwrap());
     }
 }
