@@ -2,7 +2,8 @@ export type Uuid = string;
 
 export type AuthMode =
   | { mode: "password" }
-  | { mode: "key"; key_id: Uuid };
+  | { mode: "key"; key_id: Uuid }
+  | { mode: "agent" };
 
 export interface Server {
   id: Uuid;
@@ -17,6 +18,8 @@ export interface Server {
   hardened: boolean;
   hardened_at?: string | null;
   folder_id?: Uuid | null;
+  /** Bastion host the connection is tunnelled through (ProxyJump). */
+  jump_server_id?: Uuid | null;
 }
 
 export interface Folder {
@@ -74,6 +77,7 @@ export interface NewServerInput {
   color?: string | null;
   auth: AuthMode;
   folder_id?: Uuid | null;
+  jump_server_id?: Uuid | null;
 }
 
 export interface KeyInfo {
@@ -86,6 +90,8 @@ export interface KeyInfo {
   created_at: string;
   fingerprint?: string | null;
   origin_imported: boolean;
+  /** Private key file is passphrase-protected. */
+  encrypted?: boolean;
 }
 
 export interface HostKeyRejection {
@@ -103,9 +109,40 @@ export interface KeyUsage {
   servers: Server[];
 }
 
-export interface SessionDataEvent {
-  sessionId: Uuid;
-  dataB64: string;
+/** Backend needs a password or key passphrase; see `provide_secret`. */
+export interface SecretRequest {
+  kind: "password" | "passphrase";
+  id: Uuid;
+  label: string;
+  /** A previous value was tried and rejected. */
+  wrong: boolean;
+}
+
+export interface RotateReport {
+  newKey: KeyInfo;
+  oldKeyRevoked: boolean;
+  oldKeyRemovedLocally: boolean;
+  oldKeyStillUsedBy: string[];
+  warnings: string[];
+}
+
+export interface ImportCandidate {
+  alias: string;
+  host: string;
+  user?: string | null;
+  port: number;
+  identityFile?: string | null;
+  proxyJump?: string | null;
+  effectiveUser: string;
+  alreadyExists: boolean;
+  problem?: string | null;
+  auth: "key" | "agent" | "password";
+}
+
+export interface ConfigImportReport {
+  serversAdded: number;
+  keysImported: number;
+  warnings: string[];
 }
 
 export interface SessionClosedEvent {

@@ -9,8 +9,33 @@
   let showImport = $state(false);
   let generating = $state(false);
   let generateName = $state("");
+  let generatePassphrase = $state("");
+  let generatePassphrase2 = $state("");
+  let rememberPassphrase = $state(true);
   let showGenerate = $state(false);
   let usage = $state<Server[]>([]);
+  /** null = unknown / not encrypted. */
+  let passphraseRemembered = $state<boolean | null>(null);
+
+  async function loadPassphraseStatus(k: KeyInfo | null) {
+    passphraseRemembered = null;
+    if (!k?.encrypted) return;
+    try {
+      passphraseRemembered = (await api.secretStatus("passphrase", k.id)).remembered;
+    } catch {
+      passphraseRemembered = null;
+    }
+  }
+
+  async function forgetPassphrase(k: KeyInfo) {
+    try {
+      await api.forgetSecret("passphrase", k.id);
+      passphraseRemembered = false;
+      toast.success("Passphrase vergessen — sie wird beim nächsten Verbinden erfragt.");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
 
   function select(k: KeyInfo) {
     app.selectedKeyId = k.id;
@@ -70,11 +95,21 @@
 
   async function generate(e: Event) {
     e.preventDefault();
+    if (generatePassphrase !== generatePassphrase2) {
+      toast.error("Die Passphrasen stimmen nicht überein.");
+      return;
+    }
     generating = true;
     try {
-      const k = await app.generateKey(generateName.trim());
-      toast.success(`Key „${k.name}" erzeugt (${k.algorithm})`);
+      const k = await app.generateKey(
+        generateName.trim(),
+        generatePassphrase || null,
+        rememberPassphrase,
+      );
+      toast.success(`Key „${k.name}" erzeugt (${k.algorithm}${k.encrypted ? ", mit Passphrase" : ""})`);
       generateName = "";
+      generatePassphrase = "";
+      generatePassphrase2 = "";
       showGenerate = false;
       app.selectedKeyId = k.id;
     } catch (e) {
@@ -88,6 +123,7 @@
     if (app.selectedKeyId) {
       loadUsage(app.selectedKeyId);
     }
+    loadPassphraseStatus(app.selectedKey);
   });
 </script>
 
@@ -126,6 +162,9 @@
               <span class="name">{k.name}</span>
               {#if k.origin_imported}
                 <span class="tag imported" title="Importiert">IMP</span>
+              {/if}
+              {#if k.encrypted}
+                <span class="tag" title="Mit Passphrase geschützt">🔒</span>
               {/if}
             </div>
             {#if k.fingerprint}
@@ -181,8 +220,22 @@
             <code>{k.public_path}</code>
             <button class="ghost-mini" onclick={() => copyPath(k.public_path, 'Public')}>kopieren</button>
           </div>
-          <p class="muted">Perms: 0600 (private), 0644 (public). Kompatibel mit System-<code>ssh</code>.</p>
+          <p class="muted">Perms: 0600. Kompatibel mit System-<code>ssh</code>.</p>
         </div>
+
+        {#if k.encrypted}
+          <div class="card">
+            <h3>🔒 Passphrase</h3>
+            {#if passphraseRemembered}
+              <p class="muted">Im Schlüsselbund des Betriebssystems gespeichert.</p>
+              <button class="ghost-mini" onclick={() => forgetPassphrase(k)}>Vergessen</button>
+            {:else}
+              <p class="muted">
+                Wird beim Verbinden abgefragt; im Dialog lässt sie sich im Schlüsselbund merken.
+              </p>
+            {/if}
+          </div>
+        {/if}
 
         <div class="card">
           <h3>Verwendet von {usage.length} Server{usage.length === 1 ? "" : "n"}</h3>
@@ -244,6 +297,24 @@
         <input bind:value={generateName} placeholder="z.B. personal_mac" required autofocus />
       </label>
       <p class="hint">Algorithmus: Ed25519. Datei: <code>~/.ssh/terminalox_&lt;name&gt;</code></p>
+      <label>
+        Passphrase <em>(optional)</em>
+        <input type="password" bind:value={generatePassphrase} autocomplete="new-password" />
+      </label>
+      {#if generatePassphrase}
+        <label>
+          Passphrase wiederholen
+          <input type="password" bind:value={generatePassphrase2} autocomplete="new-password" />
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={rememberPassphrase} />
+          Im Schlüsselbund des Betriebssystems merken
+        </label>
+      {/if}
+      <p class="hint">
+        Mit Passphrase ist die Key-Datei verschlüsselt. Ohne Schlüsselbund fragt
+        terminalox einmal pro App-Start danach.
+      </p>
       <div class="buttons">
         <button type="button" onclick={() => (showGenerate = false)}>Abbrechen</button>
         <button type="submit" class="primary" disabled={generating}>
@@ -255,6 +326,8 @@
 {/if}
 
 <style>
+  .check { display: flex !important; gap: 8px; align-items: center; }
+  .check input { width: auto !important; margin: 0 !important; }
   .keys-view { display: flex; flex: 1; min-width: 0; }
   .list {
     width: 300px;

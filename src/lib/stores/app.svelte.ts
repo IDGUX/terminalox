@@ -79,8 +79,12 @@ class AppStore {
     }
   }
 
-  async generateKey(name: string): Promise<KeyInfo> {
-    const k = await api.generateKey(name);
+  async generateKey(
+    name: string,
+    passphrase: string | null = null,
+    rememberPassphrase = false,
+  ): Promise<KeyInfo> {
+    const k = await api.generateKey(name, passphrase, rememberPassphrase);
     this.keys = [...this.keys, k];
     return k;
   }
