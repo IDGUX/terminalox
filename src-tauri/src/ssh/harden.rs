@@ -189,19 +189,7 @@ pub async fn harden(
 
     let (host, port, user, key_path) = target;
     let confirmation = async {
-        let mut fresh = client::connect(host, port).await?;
-        use russh::{client::AuthResult, MethodKind};
-        match fresh.authenticate_none(user).await? {
-            AuthResult::Failure { remaining_methods, .. }
-                if !remaining_methods.contains(&MethodKind::Password)
-                    && !remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
-            _ => {
-                return Err(AppError::Other(
-                    "Die neue SSH-Verbindung bietet weiterhin Passwortverfahren an oder verlangt keine Authentifizierung.".into(),
-                ));
-            }
-        }
-        client::auth_key(&mut fresh, user, key_path).await?;
+        let fresh = connect_after_reload(host, port, user, key_path).await?;
         let confirm = build_transaction_command("confirm", token, ROLLBACK_SECONDS);
         let (exit, stdout, stderr) = exec_collect(fresh, &confirm, &password).await?;
         if exit != 0 || !stdout.lines().any(|line| line.trim() == "STEP:password_auth_off") {
@@ -226,6 +214,42 @@ pub async fn harden(
         }
     }
     Ok(outcome)
+}
+
+async fn connect_after_reload(
+    host: &str,
+    port: u16,
+    user: &str,
+    key_path: &str,
+) -> AppResult<russh::client::Handle<KnownHostsVerify>> {
+    use russh::{client::AuthResult, MethodKind};
+
+    let probe = || async {
+        let mut session = client::connect(host, port).await?;
+        match session.authenticate_none(user).await? {
+            AuthResult::Failure { remaining_methods, .. }
+                if !remaining_methods.contains(&MethodKind::Password)
+                    && !remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
+            _ => {
+                return Err(AppError::Other(
+                    "Die neue SSH-Verbindung bietet weiterhin Passwortverfahren an oder verlangt keine Authentifizierung.".into(),
+                ));
+            }
+        }
+        client::auth_key(&mut session, user, key_path).await?;
+        Ok(session)
+    };
+
+    // systemctl reports completion when the daemon is signalled; the
+    // listener may briefly stop accepting connections while it re-execs.
+    for pause in [250, 500, 1000] {
+        match probe().await {
+            Ok(session) => return Ok(session),
+            Err(error @ AppError::HostKey(_)) => return Err(error),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(pause)).await,
+        }
+    }
+    probe().await
 }
 
 /// Inspect both password methods for this session without changing sshd.
@@ -410,7 +434,6 @@ pub async fn open_key_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use russh::client::AuthResult;
     use std::time::Duration;
 
     #[tokio::test]
@@ -450,18 +473,16 @@ mod tests {
         drop(channel);
         drop(session);
 
-        let mut fresh = client::connect(host, port).await.unwrap();
-        let AuthResult::Failure { remaining_methods, .. } =
-            fresh.authenticate_none(user).await.unwrap()
-        else {
-            panic!("expected the daemon to require authentication");
-        };
-        assert!(!remaining_methods.contains(&russh::MethodKind::Password));
+        let hardened_session = connect_after_reload(host, port, user, &key).await.unwrap();
+        drop(hardened_session);
 
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let mut fresh = client::connect(host, port).await.unwrap();
-                if client::auth_password(&mut fresh, user, &password).await.is_ok() {
+                let password_works = match client::connect(host, port).await {
+                    Ok(mut fresh) => client::auth_password(&mut fresh, user, &password).await.is_ok(),
+                    Err(_) => false,
+                };
+                if password_works && !std::fs::exists("/etc/ssh/.terminalox-pending").unwrap() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
