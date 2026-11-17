@@ -12,18 +12,26 @@
     remoteCleanupError: string | null;
     localKeyError: string | null;
     keyStillReferenced: boolean;
+    hardeningKept: boolean;
+    hardeningRestored: boolean;
+    hardeningRestoreError: string | null;
   }
 
   let cleanupRemote = $state(true);
   let deleteUnusedLocalKey = $state(false);
   let password = $state("");
+  let otherKeyConfirmed = $state(false);
   let sudoPassword = $state("");
   let submitting = $state(false);
   let error = $state<string | null>(null);
   let remoteError = $state<string | null>(null);
 
   const hasKeyAuth = $derived(server.auth.mode === "key");
-  const showSudo = $derived(hasKeyAuth && cleanupRemote && server.hardened && server.user !== "root");
+  const usePassword = $derived(password.length > 0);
+  // Unharden (and a possible re-harden) only runs on the password path.
+  const showSudo = $derived(
+    hasKeyAuth && cleanupRemote && usePassword && server.hardened && server.user !== "root",
+  );
 
   async function remove(localOnly: boolean) {
     error = null;
@@ -36,19 +44,29 @@
           id: server.id,
           cleanupRemote: cleanUpOnServer,
           deleteUnusedLocalKey: removeUnusedKey,
-          password: cleanUpOnServer ? password : null,
+          password: cleanUpOnServer && usePassword ? password : null,
+          otherKeyConfirmed: cleanUpOnServer && !usePassword && otherKeyConfirmed,
           sudoPassword: cleanUpOnServer && showSudo && sudoPassword ? sudoPassword : null,
           force: localOnly,
         },
       });
       if (!report.serverRemoved) {
-        remoteError =
+        let message =
           report.remoteUnhardenError ?? report.remoteCleanupError ?? "Löschen fehlgeschlagen.";
+        if (report.hardeningRestored) {
+          message += " Das SSH-Hardening wurde wiederhergestellt.";
+        } else if (report.hardeningRestoreError) {
+          message += ` Das SSH-Hardening konnte nicht wiederhergestellt werden (${report.hardeningRestoreError}); Passwort-Login ist auf dem Server wieder aktiv.`;
+        }
+        remoteError = message;
         return;
       }
       app.servers = app.servers.filter((s) => s.id !== server.id);
       if (app.selectedServerId === server.id) app.selectedServerId = null;
       await app.refresh();
+      if (report.hardeningKept) {
+        toast.info("Das SSH-Hardening bleibt auf dem Server aktiv.");
+      }
       if (report.localKeyError) {
         toast.error(`SSH-Key konnte nicht vollständig gelöscht werden: ${report.localKeyError}`);
       } else if (removeUnusedKey && report.keyStillReferenced) {
@@ -82,14 +100,28 @@
       </label>
 
       {#if cleanupRemote}
-        {#if server.hardened}
-          <p class="body revert">terminalox versucht zuerst, das SSH-Hardening rückgängig zu machen.</p>
-        {/if}
         <label>
           SSH-Login-Passwort für {server.user}@{server.host}
-          <input type="password" bind:value={password} autocomplete="current-password" required disabled={submitting} />
+          <input type="password" bind:value={password} autocomplete="current-password" disabled={submitting} />
           <span class="hint">terminalox prüft den Passwort-Login, bevor es den SSH-Key entfernt.</span>
         </label>
+        {#if usePassword}
+          {#if server.hardened}
+            <p class="body revert">
+              terminalox macht zuerst das SSH-Hardening rückgängig. Schlägt der Passwort-Login danach fehl,
+              wird das Hardening wiederhergestellt.
+            </p>
+          {/if}
+        {:else}
+          <label class="checkbox">
+            <input type="checkbox" bind:checked={otherKeyConfirmed} disabled={submitting} />
+            Kein Passwort – ich habe einen anderen SSH-Key für diesen Account
+          </label>
+          <span class="hint">
+            Der Key wird nur entfernt, wenn danach noch ein anderer Key in authorized_keys steht.
+            {#if server.hardened}Das SSH-Hardening bleibt aktiv.{/if}
+          </span>
+        {/if}
         {#if showSudo}
           <label>
             sudo-Passwort (falls erforderlich)
@@ -112,7 +144,11 @@
       {#if remoteError && cleanupRemote}
         <button type="button" onclick={() => remove(true)} disabled={submitting}>Nur lokal löschen</button>
       {/if}
-      <button type="submit" class="danger" disabled={submitting}>
+      <button
+        type="submit"
+        class="danger"
+        disabled={submitting || (hasKeyAuth && cleanupRemote && !usePassword && !otherKeyConfirmed)}
+      >
         {submitting ? "…" : remoteError && cleanupRemote ? "Erneut versuchen" : "Löschen"}
       </button>
     </div>

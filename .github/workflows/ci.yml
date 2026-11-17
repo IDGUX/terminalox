@@ -87,7 +87,10 @@ jobs:
             sudo tee /etc/ssh/sshd_config.d/00-terminalox.conf >/dev/null
           if systemctl is-active --quiet ssh.socket; then sudo systemctl stop ssh.socket; fi
           sudo systemctl restart ssh.service
-          if ! cargo test --locked --lib hardening_restores_config_without_confirmation_and_commits_after_reconnect -- --ignored; then
+          # Portable setsid timer first (hosts without systemd), then the systemd
+          # timer plus the full commit path, which leaves the server hardened.
+          if ! cargo test --locked --lib detached_timer_rolls_back_without_systemd_run -- --ignored ||
+            ! cargo test --locked --lib hardening_restores_config_without_confirmation_and_commits_after_reconnect -- --ignored; then
             sudo journalctl -u ssh.service -u 'terminalox-rollback-*.service' --no-pager -n 100
             exit 1
           fi
