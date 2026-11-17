@@ -1,30 +1,29 @@
 use russh::ChannelMsg;
 
+use crate::access::Login;
 use crate::error::{AppError, AppResult};
-use crate::ssh::client;
+use crate::ssh::client::KnownHostsVerify;
+use crate::validate;
 
-pub async fn deploy_public_key(
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &str,
+/// Logs in with `login` (usually the password) and appends the key line.
+pub async fn deploy_public_key(login: &Login, public_key_openssh: &str) -> AppResult<()> {
+    let session = login.connect().await?;
+    deploy_on_authenticated(session, public_key_openssh).await
+}
+
+/// Appends a public key line to `~/.ssh/authorized_keys` unless it is already there.
+pub async fn deploy_on_authenticated(
+    session: russh::client::Handle<KnownHostsVerify>,
     public_key_openssh: &str,
 ) -> AppResult<()> {
-    let public_key_trimmed = public_key_openssh.trim();
-    if public_key_trimmed.is_empty() {
-        return Err(AppError::Other("empty public key".into()));
-    }
-
-    let escaped = public_key_trimmed.replace('\'', "'\\''");
+    let line = validate::public_key_line(public_key_openssh)?;
+    let escaped = line.replace('\'', "'\\''");
     let script = format!(
-        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+        "umask 077 && mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
          touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && \
-         grep -qxF -- '{0}' ~/.ssh/authorized_keys || echo '{0}' >> ~/.ssh/authorized_keys",
+         {{ grep -qxF -- '{0}' ~/.ssh/authorized_keys || printf '%s\\n' '{0}' >> ~/.ssh/authorized_keys; }}",
         escaped
     );
-
-    let mut session = client::connect(host, port).await?;
-    client::auth_password(&mut session, user, password).await?;
 
     let mut channel = session.channel_open_session().await?;
     channel.exec(true, script.as_bytes()).await?;
@@ -34,8 +33,7 @@ pub async fn deploy_public_key(
 
     while let Some(msg) = channel.wait().await {
         match msg {
-            ChannelMsg::Data { data: _ } => {}
-            ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                 stderr_buf.extend_from_slice(data);
             }
             ChannelMsg::ExitStatus { exit_status } => {

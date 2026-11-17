@@ -3,10 +3,26 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::access::Login;
 use crate::error::{AppError, AppResult};
 use crate::models::AuthMode;
 use crate::ssh::harden::{self, HardenReadiness, VerifyOutcome};
 use crate::state::AppState;
+
+const PASSWORD_AUTH_HINT: &str =
+    "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen.";
+
+/// Key/agent login for a server; `None` if it still uses password auth.
+async fn key_login(state: &State<'_, AppState>, server_id: Uuid) -> AppResult<Option<Login>> {
+    let store = state.store.read().await;
+    let server = store
+        .find_server(server_id)
+        .ok_or(AppError::UnknownServer)?;
+    if matches!(server.auth, AuthMode::Password) {
+        return Ok(None);
+    }
+    Ok(Some(Login::new(&store, &state.secrets, server, None)?))
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -25,33 +41,15 @@ pub async fn check_harden_readiness(
     server_id: Uuid,
     state: State<'_, AppState>,
 ) -> AppResult<HardenReadiness> {
-    let (host, port, user, key_path) = {
-        let store = state.store.read().await;
-        let server = store
-            .find_server(server_id)
-            .ok_or(AppError::UnknownServer)?;
-        let key_id = match &server.auth {
-            AuthMode::Key { key_id } => *key_id,
-            AuthMode::Password => {
-                return Ok(HardenReadiness::Unavailable {
-                    reason:
-                        "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen."
-                            .into(),
-                });
-            }
-        };
-        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.private_path.clone(),
-        )
+    let Some(login) = key_login(&state, server_id).await? else {
+        return Ok(HardenReadiness::Unavailable {
+            reason: PASSWORD_AUTH_HINT.into(),
+        });
     };
 
-    let session = match harden::open_key_session(&host, port, &user, &key_path).await {
+    let session = match login.connect().await {
         Ok(s) => s,
-        Err(e @ AppError::HostKey(_)) => return Err(e),
+        Err(e @ (AppError::HostKey(_) | AppError::SecretRequired(_))) => return Err(e),
         Err(e) => {
             return Ok(HardenReadiness::Unavailable {
                 reason: format!("Key-Auth funktioniert nicht: {e}"),
@@ -67,37 +65,19 @@ pub async fn harden_server(
     sudo_password: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<HardenReport> {
-    let (host, port, user, key_path) = {
-        let store = state.store.read().await;
-        let server = store
-            .find_server(server_id)
-            .ok_or(AppError::UnknownServer)?;
-        let key_id = match &server.auth {
-            AuthMode::Key { key_id } => *key_id,
-            AuthMode::Password => {
-                return Err(AppError::Other(
-                    "Server ist noch auf Passwort-Auth — bitte erst einen Key deployen.".into(),
-                ));
-            }
-        };
-        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.private_path.clone(),
-        )
-    };
+    let login = key_login(&state, server_id)
+        .await?
+        .ok_or_else(|| AppError::Invalid(PASSWORD_AUTH_HINT.into()))?;
 
     let mut report = HardenReport::default();
 
     // Step 1: prove that the key actually grants access.
-    let session = match harden::open_key_session(&host, port, &user, &key_path).await {
+    let session = match login.connect().await {
         Ok(s) => {
             report.key_auth_verified = true;
             s
         }
-        Err(e @ AppError::HostKey(_)) => return Err(e),
+        Err(e @ (AppError::HostKey(_) | AppError::SecretRequired(_))) => return Err(e),
         Err(e) => {
             report.warnings.push(format!(
                 "Key-Auth-Check fehlgeschlagen: {e}. Härten wurde nicht versucht."
@@ -107,7 +87,7 @@ pub async fn harden_server(
     };
 
     // Step 2: run the harden flow (drop-in + validate + reload + verify, with rollback).
-    let outcome = harden::harden(session, (&host, port, &user, &key_path), sudo_password.as_deref()).await?;
+    let outcome = harden::harden(session, &login, sudo_password.as_deref()).await?;
     report.dropin_installed = outcome.dropin_installed;
     report.sshd_validated = outcome.sshd_validated;
     report.sshd_reloaded = outcome.sshd_reloaded;
@@ -158,30 +138,12 @@ pub async fn verify_server_hardening(
     sudo_password: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<VerifyHardenReport> {
-    let (host, port, user, key_path, was_hardened) = {
-        let store = state.store.read().await;
-        let server = store
-            .find_server(server_id)
-            .ok_or(AppError::UnknownServer)?;
-        let key_id = match &server.auth {
-            AuthMode::Key { key_id } => *key_id,
-            AuthMode::Password => {
-                return Err(AppError::Other(
-                    "Verify nur für Key-Auth-Server verfügbar.".into(),
-                ));
-            }
-        };
-        let key = store.find_key(key_id).ok_or(AppError::UnknownKey)?;
-        (
-            server.host.clone(),
-            server.port,
-            server.user.clone(),
-            key.private_path.clone(),
-            server.hardened,
-        )
-    };
+    let login = key_login(&state, server_id).await?.ok_or_else(|| {
+        AppError::Invalid("Prüfung nur für Server mit Key- oder Agent-Login verfügbar.".into())
+    })?;
+    let was_hardened = login.server.hardened;
 
-    let session = harden::open_key_session(&host, port, &user, &key_path).await?;
+    let session = login.connect().await?;
     let outcome: VerifyOutcome = harden::verify(session, sudo_password.as_deref()).await?;
 
     let is_hardened = outcome.is_hardened();

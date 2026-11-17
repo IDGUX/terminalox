@@ -17,7 +17,9 @@ fn validate_name(store: &Store, name: &str, except: Option<Uuid>) -> AppResult<S
         .iter()
         .any(|f| Some(f.id) != except && f.name.to_lowercase() == name.to_lowercase());
     if taken {
-        return Err(AppError::Other(format!("Ordner „{name}\" existiert bereits")));
+        return Err(AppError::Other(format!(
+            "Ordner „{name}\" existiert bereits"
+        )));
     }
     Ok(name.to_string())
 }
@@ -42,7 +44,11 @@ pub async fn create_folder(name: String, state: State<'_, AppState>) -> AppResul
 }
 
 #[tauri::command]
-pub async fn rename_folder(id: Uuid, name: String, state: State<'_, AppState>) -> AppResult<Folder> {
+pub async fn rename_folder(
+    id: Uuid,
+    name: String,
+    state: State<'_, AppState>,
+) -> AppResult<Folder> {
     let mut store = state.store.write().await;
     let name = validate_name(&store, &name, Some(id))?;
     let folder = store

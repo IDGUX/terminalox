@@ -1,6 +1,7 @@
 use base64::prelude::*;
 use russh::ChannelMsg;
 
+use crate::access::Login;
 use crate::error::{AppError, AppResult};
 use crate::ssh::client::{self, KnownHostsVerify};
 
@@ -176,29 +177,34 @@ fi
 /// Apply independently of the client, then confirm over a newly authenticated connection.
 pub async fn harden(
     session: russh::client::Handle<KnownHostsVerify>,
-    target: (&str, u16, &str, &str),
+    login: &Login,
     sudo_password: Option<&str>,
 ) -> AppResult<HardenOutcome> {
     let token = uuid::Uuid::new_v4();
     let password = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
     let apply = build_transaction_command("apply", token, ROLLBACK_SECONDS);
-    let rollback_notice = "Solange die Änderung unbestätigt ist, bleibt der automatische Rollback aktiv.";
-    let (exit, stdout, stderr) =
-        match tokio::time::timeout(SSH_STEP_TIMEOUT, exec_collect(session, &apply, &password)).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                return Ok(HardenOutcome {
-                    stderr: format!("{error}. {rollback_notice}"),
-                    ..Default::default()
-                });
-            }
-            Err(_) => {
-                return Ok(HardenOutcome {
-                    stderr: format!("SSH-Härtung hat das Zeitlimit überschritten. {rollback_notice}"),
-                    ..Default::default()
-                });
-            }
-        };
+    let rollback_notice =
+        "Solange die Änderung unbestätigt ist, bleibt der automatische Rollback aktiv.";
+    let (exit, stdout, stderr) = match tokio::time::timeout(
+        SSH_STEP_TIMEOUT,
+        exec_collect(session, &apply, &password),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            return Ok(HardenOutcome {
+                stderr: format!("{error}. {rollback_notice}"),
+                ..Default::default()
+            });
+        }
+        Err(_) => {
+            return Ok(HardenOutcome {
+                stderr: format!("SSH-Härtung hat das Zeitlimit überschritten. {rollback_notice}"),
+                ..Default::default()
+            });
+        }
+    };
     let rolled_back = stdout.lines().any(|line| line.trim() == "STEP:rolled_back");
     let mut outcome = parse_harden_stdout(&stdout, stderr);
     if exit != 0 || !outcome.dropin_installed || !outcome.sshd_validated || !outcome.sshd_reloaded {
@@ -211,13 +217,18 @@ pub async fn harden(
         return Ok(outcome);
     }
 
-    let (host, port, user, key_path) = target;
     let confirmation = async {
-        let fresh = connect_after_reload(host, port, user, key_path).await?;
+        let fresh = connect_after_reload(login).await?;
         let confirm = build_transaction_command("confirm", token, ROLLBACK_SECONDS);
         let (exit, stdout, stderr) = exec_collect(fresh, &confirm, &password).await?;
-        if exit != 0 || !stdout.lines().any(|line| line.trim() == "STEP:password_auth_off") {
-            return Err(AppError::RemoteCommandFailed(format!("exit {exit}: {stderr}")));
+        if exit != 0
+            || !stdout
+                .lines()
+                .any(|line| line.trim() == "STEP:password_auth_off")
+        {
+            return Err(AppError::RemoteCommandFailed(format!(
+                "exit {exit}: {stderr}"
+            )));
         }
         Ok::<_, AppError>(())
     };
@@ -240,27 +251,24 @@ pub async fn harden(
     Ok(outcome)
 }
 
-async fn connect_after_reload(
-    host: &str,
-    port: u16,
-    user: &str,
-    key_path: &str,
-) -> AppResult<russh::client::Handle<KnownHostsVerify>> {
+async fn connect_after_reload(login: &Login) -> AppResult<russh::client::Handle<KnownHostsVerify>> {
     use russh::{client::AuthResult, MethodKind};
 
+    let user = login.server.user.as_str();
     let probe = || async {
-        let mut session = client::connect(host, port).await?;
+        let mut session = client::connect(&login.target).await?;
         match session.authenticate_none(user).await? {
-            AuthResult::Failure { remaining_methods, .. }
-                if !remaining_methods.contains(&MethodKind::Password)
-                    && !remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
+            AuthResult::Failure {
+                remaining_methods, ..
+            } if !remaining_methods.contains(&MethodKind::Password)
+                && !remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
             _ => {
                 return Err(AppError::Other(
                     "Die neue SSH-Verbindung bietet weiterhin Passwortverfahren an oder verlangt keine Authentifizierung.".into(),
                 ));
             }
         }
-        client::auth_key(&mut session, user, key_path).await?;
+        client::authenticate(&mut session, user, &login.cred).await?;
         Ok(session)
     };
 
@@ -293,8 +301,7 @@ fi
     );
     let command = build_transaction_command("verify", uuid::Uuid::nil(), 0);
     let password = BASE64_STANDARD.encode(sudo_password.unwrap_or(""));
-    let (exit, stdout, stderr) =
-        exec_collect(session, &(file_check + &command), &password).await?;
+    let (exit, stdout, stderr) = exec_collect(session, &(file_check + &command), &password).await?;
     let mut outcome = parse_verify_stdout(&stdout);
     if exit != 0 {
         outcome.effective_password_auth_off = None;
@@ -388,9 +395,7 @@ fn parse_verify_stdout(stdout: &str) -> VerifyOutcome {
                 let reason = s.trim_start_matches("EFFECTIVE:skipped:");
                 o.effective_check_error = Some(match reason {
                     "no_sudo" => "Kein sudo verfügbar — Effektiv-Check übersprungen".into(),
-                    "needs_sudo_password" => {
-                        "Effektiv-Check braucht ein sudo-Passwort".into()
-                    }
+                    "needs_sudo_password" => "Effektiv-Check braucht ein sudo-Passwort".into(),
                     "sudo_auth_failed" => "sudo hat das Passwort abgelehnt".into(),
                     other => format!("Effektiv-Check übersprungen: {other}"),
                 });
@@ -434,9 +439,7 @@ async fn exec_collect(
     while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-            ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
-                stderr.extend_from_slice(data)
-            }
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => stderr.extend_from_slice(data),
             ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
             _ => {}
         }
@@ -452,24 +455,34 @@ async fn exec_collect(
     ))
 }
 
-/// Convenience: open a fresh key-authenticated session to the host. Used both as
-/// a pre-flight proof that key auth actually works, and as the transport for the
-/// hardening/unhardening scripts.
-pub async fn open_key_session(
-    host: &str,
-    port: u16,
-    user: &str,
-    key_path: &str,
-) -> AppResult<russh::client::Handle<KnownHostsVerify>> {
-    let mut session = client::connect(host, port).await?;
-    client::auth_key(&mut session, user, key_path).await?;
-    Ok(session)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AuthMode, Server};
+    use crate::ssh::client::{Credential, KeyCred, Target};
     use std::time::Duration;
+
+    fn login(key: &str) -> Login {
+        Login {
+            server: Server {
+                id: uuid::Uuid::new_v4(),
+                name: "ci".into(),
+                host: HOST.into(),
+                port: PORT,
+                user: USER.into(),
+                auth: AuthMode::Agent,
+                color: None,
+                created_at: chrono::Utc::now(),
+                last_used_at: None,
+                hardened: false,
+                hardened_at: None,
+                folder_id: None,
+                jump_server_id: None,
+            },
+            target: Target::direct(HOST, PORT),
+            cred: Credential::Key(KeyCred::load(key, None).unwrap()),
+        }
+    }
 
     const HOST: &str = "127.0.0.1";
     const PORT: u16 = 22222;
@@ -483,7 +496,7 @@ mod tests {
         let original_config = std::fs::read(ssh_config).unwrap();
         let original_dropin = std::fs::read(DROPIN_PATH).unwrap();
 
-        let session = open_key_session(HOST, PORT, USER, key).await.unwrap();
+        let session = login(key).connect().await.unwrap();
         let mut channel = session.channel_open_session().await.unwrap();
         let apply =
             build_transaction_command_with_timer("apply", uuid::Uuid::new_v4(), 10, timer_mode);
@@ -509,13 +522,15 @@ mod tests {
         drop(channel);
         drop(session);
 
-        let hardened_session = connect_after_reload(HOST, PORT, USER, key).await.unwrap();
+        let hardened_session = connect_after_reload(&login(key)).await.unwrap();
         drop(hardened_session);
 
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let password_works = match client::connect(HOST, PORT).await {
-                    Ok(mut fresh) => client::auth_password(&mut fresh, USER, password).await.is_ok(),
+                let password_works = match client::connect(&Target::direct(HOST, PORT)).await {
+                    Ok(mut fresh) => client::auth_password(&mut fresh, USER, password)
+                        .await
+                        .is_ok(),
                     Err(_) => false,
                 };
                 if password_works && !std::fs::exists(PENDING).unwrap() {
@@ -545,10 +560,9 @@ mod tests {
         let password = std::env::var("TERMINALOX_TEST_PASSWORD").unwrap();
         assert_timer_rolls_back(&key, &password, "auto").await;
 
-        let session = open_key_session(HOST, PORT, USER, &key).await.unwrap();
-        let outcome = harden(session, (HOST, PORT, USER, &key), Some(&password))
-            .await
-            .unwrap();
+        let login = login(&key);
+        let session = login.connect().await.unwrap();
+        let outcome = harden(session, &login, Some(&password)).await.unwrap();
         assert!(outcome.all_ok(), "{outcome:?}");
         assert!(!std::fs::exists(PENDING).unwrap());
     }

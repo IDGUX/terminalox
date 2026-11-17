@@ -1,7 +1,8 @@
 use russh::ChannelMsg;
 
+use crate::access::Login;
 use crate::error::{AppError, AppResult};
-use crate::ssh::client::{self, KnownHostsVerify};
+use crate::ssh::client::KnownHostsVerify;
 
 /// Remove a specific public key line from `~/.ssh/authorized_keys` on the remote host.
 ///
@@ -47,7 +48,7 @@ mv -- "$tmp" "$file"
     let mut exit: Option<u32> = None;
     while let Some(msg) = channel.wait().await {
         match msg {
-            ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                 stderr_buf.extend_from_slice(data);
             }
             ChannelMsg::ExitStatus { exit_status } => {
@@ -77,35 +78,46 @@ mv -- "$tmp" "$file"
     Ok(())
 }
 
-pub async fn revoke_with_password(
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &str,
-    public_key_openssh: &str,
-) -> AppResult<()> {
-    let mut session = client::connect(host, port).await?;
-    client::auth_password(&mut session, user, password).await?;
+/// Revoke after logging in with `login`'s password: proves the fallback works.
+pub async fn revoke_with_password(login: &Login, public_key_openssh: &str) -> AppResult<()> {
+    let session = login.connect().await?;
     revoke_on_authenticated(session, public_key_openssh, false).await
 }
 
-/// Revoke over the key itself, for accounts without a password. Refuses when
+/// Revoke over a key login, for accounts without a password. Refuses when
 /// no other key would remain in `authorized_keys`.
-pub async fn revoke_with_key_keeping_other(
-    host: &str,
-    port: u16,
-    user: &str,
-    key_path: &str,
-    public_key_openssh: &str,
-) -> AppResult<()> {
-    let mut session = client::connect(host, port).await?;
-    client::auth_key(&mut session, user, key_path).await?;
+pub async fn revoke_keeping_other(login: &Login, public_key_openssh: &str) -> AppResult<()> {
+    let session = login.connect().await?;
     revoke_on_authenticated(session, public_key_openssh, true).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AuthMode, Server};
+    use crate::ssh::client::{self, Credential, KeyCred, Target};
+
+    fn login(cred: Credential) -> Login {
+        Login {
+            server: Server {
+                id: uuid::Uuid::new_v4(),
+                name: "ci".into(),
+                host: "127.0.0.1".into(),
+                port: 22222,
+                user: "terminalox-test".into(),
+                auth: AuthMode::Agent,
+                color: None,
+                created_at: chrono::Utc::now(),
+                last_used_at: None,
+                hardened: false,
+                hardened_at: None,
+                folder_id: None,
+                jump_server_id: None,
+            },
+            target: Target::direct("127.0.0.1", 22222),
+            cred,
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires the disposable OpenSSH server configured by CI"]
@@ -118,15 +130,17 @@ mod tests {
         let public_key = std::fs::read_to_string(format!("{key_path}.pub")).unwrap();
 
         // The fixture's authorized_keys holds only this key: key-only revocation must refuse.
-        let refused =
-            revoke_with_key_keeping_other(host, port, user, &key_path, &public_key).await;
+        let key = KeyCred::load(&key_path, None).unwrap();
+        let target = Target::direct(host, port);
+        let refused = revoke_keeping_other(&login(Credential::Key(key.clone())), &public_key).await;
         assert!(refused.is_err(), "revoking the last key must be refused");
 
-        let rejected = revoke_with_password(host, port, user, "wrong password", &public_key).await;
-        assert!(matches!(rejected, Err(AppError::AuthFailed)));
+        let wrong = login(Credential::Password("wrong password".into()));
+        let rejected = revoke_with_password(&wrong, &public_key).await;
+        assert!(matches!(rejected, Err(AppError::SecretRequired(_))));
 
-        let mut session = client::connect(host, port).await.unwrap();
-        client::auth_key(&mut session, user, &key_path)
+        let mut session = client::connect(&target).await.unwrap();
+        client::auth_key(&mut session, user, &key)
             .await
             .expect("the key must still work after a rejected fallback login");
         session
@@ -134,12 +148,12 @@ mod tests {
             .await
             .unwrap();
 
-        revoke_with_password(host, port, user, &password, &public_key)
+        revoke_with_password(&login(Credential::Password(password.clone())), &public_key)
             .await
             .expect("a working fallback login must allow key revocation");
 
-        let mut session = client::connect(host, port).await.unwrap();
-        let rejected = client::auth_key(&mut session, user, &key_path).await;
+        let mut session = client::connect(&target).await.unwrap();
+        let rejected = client::auth_key(&mut session, user, &key).await;
         assert!(matches!(rejected, Err(AppError::AuthFailed)));
         client::auth_password(&mut session, user, &password)
             .await
