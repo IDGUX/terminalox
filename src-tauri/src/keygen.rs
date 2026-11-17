@@ -56,7 +56,7 @@ pub fn generate_ed25519(name: &str) -> AppResult<KeyInfo> {
     let mut key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
         .map_err(|e| AppError::Other(format!("key generation failed: {e}")))?;
     let comment = format!("terminalox:{safe}");
-    key.set_comment(&comment);
+    key.set_comment(comment.as_str());
 
     let private_pem = key
         .to_openssh(LineEnding::LF)
