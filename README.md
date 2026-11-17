@@ -29,7 +29,8 @@ You can remove unused keys from previously deleted server entries in the key man
 
 ## Features
 
-- Interactive SSH terminal (xterm.js, full PTY).
+- Interactive SSH terminal with tabs and split panes (xterm.js, full PTY).
+- SSH host-key verification using `~/.ssh/known_hosts`, with a fingerprint prompt for new keys.
 - Ed25519 key generation + import of existing keys.
 - **One-click SSH hardening** and optional removal of the managed configuration during server cleanup.
 - Key management page with fingerprint, copy-public-to-clipboard, reverse-lookup ("which servers use this key").
@@ -40,7 +41,7 @@ You can remove unused keys from previously deleted server entries in the key man
 
 ## Download
 
-Pre-built binaries are produced by the GitHub Actions workflow on every tag (`v*`). Grab the matching installer from the [Releases](../../releases) page:
+The GitHub Actions release workflow builds installers for `v*` tags and supports manual runs. Grab the matching installer from the [Releases](https://github.com/IDGUX/terminalox/releases) page:
 
 - **macOS:** `terminalox_<version>_aarch64.dmg` (Apple Silicon) or `terminalox_<version>_x64.dmg` (Intel)
 - **Windows:** `terminalox_<version>_x64-setup.exe` (NSIS) or `.msi`
@@ -57,9 +58,9 @@ These builds are **not code-signed** yet (that costs money and an Apple/Microsof
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs) ≥ 1.85
-- [Node.js](https://nodejs.org) ≥ 20
-- [pnpm](https://pnpm.io): `npm install -g pnpm`
+- Stable [Rust](https://rustup.rs)
+- A supported [Node.js](https://nodejs.org) LTS release
+- [pnpm](https://pnpm.io) 10 to match CI
 - Platform-specific:
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
   - **Windows:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) + [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (bundled with Windows 11)
@@ -68,9 +69,9 @@ These builds are **not code-signed** yet (that costs money and an Apple/Microsof
 ### Steps
 
 ```bash
-git clone https://github.com/<user>/terminalox.git
+git clone https://github.com/IDGUX/terminalox.git
 cd terminalox
-pnpm install
+pnpm install --frozen-lockfile
 pnpm tauri dev          # development, hot-reload
 pnpm tauri build        # release build → src-tauri/target/release/bundle/
 ```
@@ -107,15 +108,14 @@ src-tauri/
 ## Security notes
 
 - Passwords are **never persisted**. terminalox uses them for SSH login during deployment and cleanup, or for `sudo` when changing the server configuration.
-- Private keys live as files under `~/.ssh/terminalox_<name>` with `0600` permissions. They are not encrypted at rest on the filesystem (the OS user account is the trust boundary).
-- Host-key verification is currently accept-any (TOFU + `known_hosts` is on the roadmap — do **not** use this on untrusted networks until that lands).
+- Managed private keys are unencrypted files under `~/.ssh/terminalox_*`. On Unix, terminalox applies `0600` after writing the file. On Windows, the files inherit filesystem permissions. Passphrase-protected private-key import is currently unsupported.
+- terminalox checks `~/.ssh/known_hosts` before sending credentials. For a new key, compare the displayed SHA-256 fingerprint with a fingerprint obtained through a trusted channel before accepting it. A changed key of the same algorithm triggers a warning. Approving a replacement appends it to `known_hosts`; retire the old key separately once you have verified the rotation. An unreadable trust store can be treated as empty, and the parser does not honor OpenSSH `@revoked` markers.
 - SSH hardening installs `/etc/ssh/sshd_config.d/00-terminalox.conf` and may add a managed `Include` block to `/etc/ssh/sshd_config`. Uninstalling terminalox leaves the remote configuration in place.
-- Backups produced with a passphrase are AES-256-GCM with Argon2id (64 MiB, 3 iterations, 4 lanes). Plain-JSON backups are clearly flagged in the UI with a warning.
+- Hardening changes a daemon-wide SSH configuration. Its final check uses `sshd -T` without a connection context, so it cannot verify per-connection `Match` rules. Keep a separate recovery channel available because an interruption or failed rollback can require manual recovery.
+- Backups protected by a passphrase use AES-256-GCM with Argon2id (64 MiB, 3 iterations, 4 lanes). Plain JSON backups contain private keys in base64. Set a passphrase to protect exported keys.
 
 ## Roadmap
 
-- Host-key verification (known_hosts + TOFU prompt).
-- Tabs / multiple simultaneous terminals.
 - SFTP panel.
 - Port-forwarding.
 - Code-signing for macOS/Windows releases.
