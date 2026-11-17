@@ -342,18 +342,7 @@
         await app.refresh();
       }
       if (r.isHardened) {
-        if (r.effectivePasswordAuthOff === true) {
-          toast.success(
-            `✓ Härtung bestätigt — sshd liefert PasswordAuthentication=no auf ${s.name}.`,
-          );
-        } else {
-          // Drop-in da, sudo-Check übersprungen
-          toast.success(
-            `✓ Drop-in vorhanden auf ${s.name}. Effektiv-Check übersprungen: ${
-              r.effectiveCheckError ?? "unbekannt"
-            }.`,
-          );
-        }
+        toast.success(`Härtung bestätigt: Beide Passwortverfahren sind auf ${s.name} für diese Verbindung deaktiviert.`);
       } else {
         // Drift erkannt
         const detail = !r.dropinPresent
@@ -361,8 +350,8 @@
           : !r.dropinContentIntact
             ? "Drop-in wurde verändert."
             : r.effectivePasswordAuthOff === false
-              ? "Effektive sshd-Konfig erlaubt wieder Passwort-Login."
-              : "Härtung ist nicht mehr aktiv.";
+              ? "Die SSH-Konfiguration erlaubt für diese Verbindung wieder ein Passwortverfahren."
+              : r.effectiveCheckError || "Die wirksame SSH-Konfiguration konnte nicht geprüft werden.";
         toast.error(`⚠ Härtung nicht mehr intakt: ${detail}`);
       }
     } catch (e) {

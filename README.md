@@ -16,9 +16,9 @@ The use case this was built for: you SSH into a lot of boxes every day, but sett
 3. verifies key-auth actually works,
 4. installs `/etc/ssh/sshd_config.d/00-terminalox.conf` to disable password and keyboard-interactive authentication,
 5. validates `sshd -t` + reloads sshd,
-6. confirms with `sshd -T` that password-auth is really off.
+6. opens a fresh SSH connection, verifies key login again and confirms that both password methods are disabled for that connection.
 
-terminalox marks the server 🛡 *hardened* after successful key verification, configuration validation, reload, and a check of the effective password-authentication setting. The hardening script attempts to roll back its configuration changes if validation, reload, or that final check fails.
+Hardening requires a reloadable systemd SSH service and permission to schedule a system timer. Before editing the SSH configuration, terminalox saves the affected files and schedules a server-side rollback after two minutes. It cancels the rollback and marks the server 🛡 *hardened* after the fresh connection passes verification. If the client disconnects or verification fails, the timer restores the previous configuration and reloads SSH.
 
 ## Remove a server entry
 
@@ -111,7 +111,7 @@ src-tauri/
 - Managed private keys are unencrypted files under `~/.ssh/terminalox_*`. On Unix, terminalox applies `0600` after writing the file. On Windows, the files inherit filesystem permissions. Passphrase-protected private-key import is currently unsupported.
 - terminalox checks `~/.ssh/known_hosts` before sending credentials. For a new key, compare the displayed SHA-256 fingerprint with a fingerprint obtained through a trusted channel before accepting it. A changed key of the same algorithm triggers a warning. Approving a replacement appends it to `known_hosts`; retire the old key separately once you have verified the rotation. An unreadable trust store can be treated as empty, and the parser does not honor OpenSSH `@revoked` markers.
 - SSH hardening installs `/etc/ssh/sshd_config.d/00-terminalox.conf` and may add a managed `Include` block to `/etc/ssh/sshd_config`. Uninstalling terminalox leaves the remote configuration in place.
-- Hardening changes a daemon-wide SSH configuration. Its final check uses `sshd -T` without a connection context, so it cannot verify per-connection `Match` rules. Keep a separate recovery channel available because an interruption or failed rollback can require manual recovery.
+- Hardening changes a daemon-wide SSH configuration. Verification evaluates `Match` rules for the tested SSH user and connection. Other users or source addresses can have different settings. Keep a separate recovery channel available. The transient systemd timer survives an SSH disconnect; a server reboot or a failed service reload may require manual recovery. Pending rollback files are stored in `/etc/ssh/.terminalox-pending`.
 - Backups protected by a passphrase use AES-256-GCM with Argon2id (64 MiB, 3 iterations, 4 lanes). Plain JSON backups contain private keys in base64. Set a passphrase to protect exported keys.
 
 ## Roadmap

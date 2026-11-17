@@ -70,6 +70,13 @@ pub async fn deploy_key(
         }
     };
 
+    if !assign_to_server {
+        report.warnings.push(
+            "Key ist deployed. Für die Härtung muss der geprüfte SSH-Key dem Server in terminalox zugewiesen werden.".into(),
+        );
+        return Ok(report);
+    }
+
     // Step 3: Probe privilege. Harden if possible — covers root, NOPASSWD,
     //         and the standard Debian/Ubuntu case (user in sudo group, needs
     //         a password). For the password case, we default to reusing the
@@ -86,7 +93,7 @@ pub async fn deploy_key(
                     Some(sudo_password.as_deref().unwrap_or(password.as_str()))
                 }
             };
-            let outcome = harden::harden(harden_session, sudo_pw).await?;
+            let outcome = harden::harden(harden_session, (&host, port, &user, &key_path), sudo_pw).await?;
             report.dropin_installed = outcome.dropin_installed;
             report.sshd_validated = outcome.sshd_validated;
             report.sshd_reloaded = outcome.sshd_reloaded;
@@ -112,10 +119,8 @@ pub async fn deploy_key(
     {
         let mut store = state.store.write().await;
         if let Some(s) = store.find_server_mut(server_id) {
-            if assign_to_server {
-                s.auth = AuthMode::Key { key_id };
-                report.server_auth_switched = true;
-            }
+            s.auth = AuthMode::Key { key_id };
+            report.server_auth_switched = true;
             if report.hardened {
                 s.hardened = true;
                 s.hardened_at = Some(Utc::now());
