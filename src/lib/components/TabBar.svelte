@@ -35,18 +35,6 @@
       >
     {/each}
   </div>
-  <div class="lang" role="radiogroup" aria-label={t("tabs.language")}>
-    {#each locales as l (l.id)}
-      <button
-        class="lang-btn"
-        class:active={i18n.locale === l.id}
-        role="radio"
-        aria-checked={i18n.locale === l.id}
-        title={l.id === "en" ? "English (US)" : "Deutsch"}
-        onclick={() => i18n.setLocale(l.id)}>{l.label}</button
-      >
-    {/each}
-  </div>
   <div class="brand">terminalox</div>
 </nav>
 
