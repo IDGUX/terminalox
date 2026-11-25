@@ -101,6 +101,24 @@ pnpm tauri build
 cp -R src-tauri/target/release/bundle/macos/terminalox.app /Applications/
 ```
 
+#### Local network access (servers on your LAN)
+
+On first connect to a host in your local network (e.g. a Raspberry Pi), macOS asks whether terminalox may access the local network. If you deny it, or the permission gets lost, connections to LAN hosts fail with `No route to host`, while `ssh` from Terminal still works (Terminal has its own permission). Re-enable it under **System Settings → Privacy & Security → Local Network**.
+
+macOS ties this permission to the app's code signature. A default self-built app is only ad-hoc signed, and every rebuild gets a new signature, so **the permission is lost after each update**. To keep it across builds, sign with a stable local certificate (one-time setup):
+
+1. Open **Keychain Access → Keychain Access (menu) → Certificate Assistant → Create a Certificate…**
+2. Name: `terminalox Local`, Identity Type: **Self-Signed Root**, Certificate Type: **Code Signing** → Create.
+3. Build with that identity:
+
+   ```bash
+   APPLE_SIGNING_IDENTITY="terminalox Local" pnpm tauri build
+   ```
+
+   On the first build, macOS asks whether `codesign` may use the key; choose **Always Allow**.
+
+After installing that build and allowing local network access once, the permission survives all later builds signed the same way. `security find-identity -p codesigning` lists the certificate as `CSSMERR_TP_NOT_TRUSTED`; that is expected for a self-signed certificate and does not affect local signing. The certificate stays in your keychain and is never part of the repository.
+
 ### Windows (PowerShell)
 
 Open **PowerShell** (no admin needed for most steps; the Build Tools installer asks for elevation itself):
@@ -168,7 +186,9 @@ pnpm install --frozen-lockfile
 pnpm tauri build
 ```
 
-Then install the new build the same way as above. Your servers and keys are kept.
+Then install the new build the same way as above. Your servers and keys are kept. On macOS, build with `APPLE_SIGNING_IDENTITY` if you set up a local certificate, otherwise local network access must be allowed again after each update (see [Local network access](#local-network-access-servers-on-your-lan)).
+
+If `cargo` is not found in a new terminal window, run `source "$HOME/.cargo/env"` first.
 
 ### Development
 
